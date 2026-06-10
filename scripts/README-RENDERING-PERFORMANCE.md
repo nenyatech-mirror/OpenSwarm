@@ -1,65 +1,65 @@
-# Playwright 렌더링 성능 측정 스크립트
+# Playwright Rendering Performance Script
 
-모든 프론트엔드 탭을 순회하며 렌더링 완료까지의 시간을 측정하는 자동화 스크립트입니다.
+An automation script that walks every frontend tab and measures time to render completion.
 
-## 개요
+## Overview
 
-이 스크립트는 Playwright를 활용하여 OpenSwarm 대시보드의 모든 탭에 대해 다음 메트릭을 수집합니다:
+Using Playwright, this script collects the following metrics for every tab of the OpenSwarm dashboard:
 
-- **Navigation Time**: 페이지 이동 시간
-- **DOM Content Loaded**: DOM 콘텐츠 로드 완료 시간
-- **Load Complete**: 모든 리소스 로드 완료 시간
-- **Render Complete**: 렌더링 완료 시간 (리플로우/리페인트 포함)
-- **First Paint (FP)**: 첫 픽셀 렌더링 시간
-- **First Contentful Paint (FCP)**: 첫 콘텐츠 렌더링 시간
-- **Largest Contentful Paint (LCP)**: 가장 큰 콘텐츠 렌더링 시간
+- **Navigation Time**: page navigation duration
+- **DOM Content Loaded**: time until DOM content is loaded
+- **Load Complete**: time until all resources are loaded
+- **Render Complete**: time until rendering completes (including reflow/repaint)
+- **First Paint (FP)**: time to first pixel
+- **First Contentful Paint (FCP)**: time to first content render
+- **Largest Contentful Paint (LCP)**: time to largest content render
 
-## 설치
+## Installation
 
 ```bash
 npm install
 ```
 
-Playwright는 `playwright` 패키지로 devDependencies에 포함되어 있습니다.
+Playwright is included in devDependencies via the `playwright` package.
 
-## 사용 방법
+## Usage
 
-### 기본 실행
+### Basic run
 
 ```bash
 npm run perf:measure
 ```
 
-또는 직접 실행:
+Or run directly:
 
 ```bash
 tsx scripts/playwright-rendering-performance.ts
 ```
 
-### 환경 변수를 통한 설정
+### Configuration via environment variables
 
 ```bash
-# 특정 URL에 대해 테스트
+# Test against a specific URL
 BASE_URL=http://your-server:3000 npm run perf:measure
 
-# 결과 저장 위치 변경
+# Change where results are written
 OUTPUT_DIR=./custom-results npm run perf:measure
 
-# 둘 다 설정
+# Both
 BASE_URL=http://localhost:8080 OUTPUT_DIR=./performance-data npm run perf:measure
 ```
 
-## 측정되는 탭 목록
+## Measured tabs
 
-다음 3개 탭이 순회되며 측정됩니다:
+The following 3 tabs are visited and measured:
 
-1. **REPOS** - 저장소 관리
-2. **PIPELINE** - 파이프라인 및 로그 조회
-3. **CHAT** - 에이전트 채팅
+1. **REPOS** — repository management
+2. **PIPELINE** — pipeline and log viewer
+3. **CHAT** — agent chat
 
-## 출력 형식
+## Output formats
 
-### JSON 형식 (`rendering-metrics-TIMESTAMP.json`)
+### JSON (`rendering-metrics-TIMESTAMP.json`)
 
 ```json
 {
@@ -80,7 +80,7 @@ BASE_URL=http://localhost:8080 OUTPUT_DIR=./performance-data npm run perf:measur
         "loadEventEnd": 3456.78
       }
     }
-    // ... 더 많은 탭 데이터
+    // ... more tab entries
   ],
   "summary": {
     "averageRenderTime": 3000.45,
@@ -92,7 +92,7 @@ BASE_URL=http://localhost:8080 OUTPUT_DIR=./performance-data npm run perf:measur
 }
 ```
 
-### CSV 형식 (`rendering-metrics-TIMESTAMP.csv`)
+### CSV (`rendering-metrics-TIMESTAMP.csv`)
 
 | Tab | Total (ms) | Navigation (ms) | DOMContentLoaded (ms) | Load Complete (ms) | Render Complete (ms) | FCP (ms) | LCP (ms) |
 |-----|-----------|-----------------|----------------------|-------------------|---------------------|---------|---------|
@@ -100,78 +100,78 @@ BASE_URL=http://localhost:8080 OUTPUT_DIR=./performance-data npm run perf:measur
 | PIPELINE | 3456.78 | 1100.45 | 2200.56 | 3100.67 | 3456.78 | 1400.23 | 2500.34 |
 | CHAT | 5234.56 | 1400.78 | 2500.89 | 3600.90 | 5234.56 | 1600.45 | 3000.67 |
 
-## 결과 분석
+## Interpreting results
 
-### 성능 지표 해석
+### Performance targets
 
-- **Total Render Time**: 전체 렌더링 시간. 이 값이 낮을수록 좋습니다.
-- **FCP < 2000ms**: 좋음
-- **LCP < 2500ms**: 좋음
-- **전체 렌더링 < 3000ms**: 목표
+- **Total Render Time**: end-to-end rendering time — lower is better
+- **FCP < 2000ms**: good
+- **LCP < 2500ms**: good
+- **Total rendering < 3000ms**: target
 
-### 성능 문제 식별
+### Identifying slow tabs
 
-스크립트는 자동으로 평균 렌더링 시간의 1.5배 이상인 탭을 "성능 문제 탭"으로 표시합니다:
+The script automatically flags tabs whose render time exceeds 1.5× the average:
 
 ```
-⚠️  성능 문제 탭 (평균의 1.5배 이상):
+⚠️  Slow tabs (≥ 1.5× the average):
   - instances: 5234.56ms
   - sessions: 4890.12ms
 ```
 
-## 실제 사용 예시
+## Examples
 
-### 1. 기본 성능 테스트 (로컬 개발 서버)
+### 1. Basic performance test (local dev server)
 
 ```bash
-# 1. OpenSwarm 대시보드 서버 시작
+# 1. Start the OpenSwarm dashboard server
 npm run dev
 
-# 2. 다른 터미널에서 성능 측정 (기본값: localhost:5173)
+# 2. In another terminal, run the measurement (default: localhost:5173)
 npm run perf:measure
 ```
 
-### 2. 프로덕션 환경 성능 측정
+### 2. Measuring a production environment
 
 ```bash
 BASE_URL=https://your-openswarm-domain.com npm run perf:measure
 ```
 
-### 3. 사용자 정의 결과 저장 디렉토리
+### 3. Custom results directory
 
 ```bash
 OUTPUT_DIR=./custom-results npm run perf:measure
 ```
 
-## 성능 최적화 팁
+## Optimization tips
 
-스크립트 실행 결과를 기반으로 다음과 같이 최적화할 수 있습니다:
+Based on the measurements, consider:
 
-### 렌더링 시간 감소
-- 불필요한 리렌더링 제거
-- 가상화 (virtualization) 구현
-- 코드 스플리팅 적용
+### Reducing render time
+- Remove unnecessary re-renders
+- Implement virtualization
+- Apply code splitting
 
-### FCP 개선
-- 중요한 리소스 우선로드
-- 인라인 크리티컬 CSS
-- 폰트 최적화
+### Improving FCP
+- Preload critical resources
+- Inline critical CSS
+- Optimize fonts
 
-### LCP 개선
-- 이미지 최적화
-- 지연 로딩 (Lazy Loading) 적용
-- 리소스 압축
+### Improving LCP
+- Optimize images
+- Apply lazy loading
+- Compress resources
 
-## 자동화 (CI/CD)
+## Automation (CI/CD)
 
-GitHub Actions 또는 다른 CI/CD 파이프라인에서 정기적으로 실행할 수 있습니다:
+Run periodically from GitHub Actions or any CI/CD pipeline:
 
 ```yaml
 # .github/workflows/performance.yml
 name: Performance Test
 on:
   schedule:
-    - cron: '0 0 * * *'  # 매일 자정 실행
+    - cron: '0 0 * * *'  # daily at midnight
 
 jobs:
   perf-test:
@@ -195,45 +195,45 @@ jobs:
           path: performance-results/
 ```
 
-## 트러블슈팅
+## Troubleshooting
 
-### 연결 거부 오류 (net::ERR_CONNECTION_REFUSED)
+### Connection refused (net::ERR_CONNECTION_REFUSED)
 
-**원인**: 지정된 BASE_URL에서 서버가 실행 중이 아님
+**Cause**: no server running at the configured BASE_URL
 
-**해결책**:
+**Fix**:
 ```bash
-# 1. UI 서버 실행 확인
+# 1. Make sure the UI server is running
 cd openclaw/ui && npm run dev
 
-# 2. 다른 포트에서 실행 중인 경우
+# 2. If it runs on a different port
 BASE_URL=http://localhost:3000 npm run perf:measure
 ```
 
-### 타임아웃 오류
+### Timeout errors
 
-**원인**: 페이지 로딩이 오래 걸림
+**Cause**: the page takes too long to load
 
-**해결책**:
-- 네트워크 연결 확인
-- 브라우저 개발자 도구에서 렌더링 성능 확인
-- 페이지 리소스 최적화 고려
+**Fix**:
+- Check network connectivity
+- Inspect rendering performance in browser devtools
+- Consider optimizing page resources
 
-### Playwright 설치 오류
+### Playwright installation errors
 
-**원인**: Playwright 브라우저 바이너리가 없음
+**Cause**: Playwright browser binaries are missing
 
-**해결책**:
+**Fix**:
 ```bash
 npx playwright install chromium
 ```
 
-## 추가 리소스
+## Further reading
 
-- [Playwright 공식 문서](https://playwright.dev/)
-- [Web Vitals 가이드](https://web.dev/vitals/)
-- [성능 최적화 가이드](https://web.dev/performance/)
+- [Playwright documentation](https://playwright.dev/)
+- [Web Vitals guide](https://web.dev/vitals/)
+- [Performance optimization guide](https://web.dev/performance/)
 
-## 라이선스
+## License
 
-OpenSwarm 프로젝트와 동일한 라이선스를 따릅니다.
+Same license as the OpenSwarm project.
