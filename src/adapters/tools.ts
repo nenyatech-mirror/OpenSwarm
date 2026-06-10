@@ -173,9 +173,11 @@ function invalidateCache(cache: ReadCache | undefined, filePath: string): void {
 export interface ToolExecOptions {
   /** Filenames (matched by path suffix) for which edit_file/write_file are refused */
   protectedFiles?: string[];
-  /** bash tool timeout (default 30000ms) */
+  /** bash tool timeout (default DEFAULT_BASH_TIMEOUT_MS) */
   bashTimeoutMs?: number;
 }
+
+const DEFAULT_BASH_TIMEOUT_MS = 30000;
 
 function isProtected(resolved: string, protectedFiles?: string[]): boolean {
   if (!protectedFiles?.length) return false;
@@ -279,9 +281,12 @@ export async function executeTool(
         const updated = original.replace(args.old_string, args.new_string);
         await fs.writeFile(filePath, updated, 'utf-8');
         invalidateCache(cache, filePath);
-        // 변경 결과(주변 컨텍스트)를 함께 반환해 모델이 재read 없이 확인하도록 한다.
+        // Return the changed region so the model can verify without a re-read.
+        // Locate the edit via old_string's position in the ORIGINAL (guaranteed
+        // unique above) — indexOf(new_string) on the updated text could match an
+        // earlier pre-existing occurrence and show the wrong region.
         const newLines = updated.split('\n');
-        const editLine = updated.slice(0, updated.indexOf(args.new_string)).split('\n').length - 1;
+        const editLine = original.slice(0, original.indexOf(args.old_string)).split('\n').length - 1;
         const from = Math.max(0, editLine - 3);
         const to = Math.min(newLines.length, editLine + args.new_string.split('\n').length + 3);
         const snippet = newLines.slice(from, to).map((l, i) => `${from + i + 1}\t${l}`).join('\n');
@@ -320,7 +325,7 @@ export async function executeTool(
         try {
           const { stdout, stderr } = await execFileAsync('bash', ['-c', command], {
             cwd,
-            timeout: execOptions?.bashTimeoutMs ?? 30000,
+            timeout: execOptions?.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS,
             maxBuffer: 1024 * 512,
             env: process.env,
           });
@@ -342,7 +347,7 @@ export async function executeTool(
           // model to conclude "the verification environment is broken" and start
           // dismantling the harness (observed in SWE runs).
           if (e.killed && e.signal) {
-            const limit = execOptions?.bashTimeoutMs ?? 30000;
+            const limit = execOptions?.bashTimeoutMs ?? DEFAULT_BASH_TIMEOUT_MS;
             return {
               tool_call_id: callId,
               content: `TIMEOUT: command exceeded ${Math.round(limit / 1000)}s and was killed (${e.signal}). ` +

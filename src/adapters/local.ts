@@ -157,6 +157,9 @@ export class LocalModelAdapter implements CliAdapter {
       timeoutMs: options.timeoutMs || 300000,
       onLog: options.onLog,
       enableTools: supportsTools,
+      nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
+      protectedFiles: options.protectedFiles,
+      bashTimeoutMs: options.bashTimeoutMs,
     };
 
     try {

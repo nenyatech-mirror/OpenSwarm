@@ -9,8 +9,24 @@
 //          fixed persona block.
 // ============================================
 
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
 import { saveMemory, searchMemorySafe } from './memoryCore.js';
 import type { WorkerResult } from '../agents/agentPair.js';
+
+/**
+ * Normalize a project path into a stable repo key. The LanceDB repo filter is
+ * an exact string match, so trailing slashes or symlinked paths to the same
+ * repo would otherwise split the knowledge across keys that never match.
+ */
+function repoKey(projectPath: string): string {
+  const resolved = path.resolve(projectPath);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved; // path may not exist yet (tests, dry runs) — resolve is enough
+  }
+}
 
 /** Repo knowledge item injected into the worker prompt (mirrors locale WorkerContext) */
 export interface RepoMemoryBrief {
@@ -35,7 +51,7 @@ export async function recallRepoKnowledge(
   try {
     const query = `${taskTitle}\n${taskDescription}`.slice(0, 500);
     const result = await searchMemorySafe(query, {
-      repo: projectPath,
+      repo: repoKey(projectPath),
       // Include 'belief' — memories from other write paths may have been
       // distilled down to belief and would otherwise be filtered out.
       types: ['system_pattern', 'constraint', 'fact', 'strategy', 'belief'],
@@ -80,10 +96,11 @@ export async function recordTaskOutcome(
   outcome: TaskOutcomeInput,
 ): Promise<void> {
   try {
+    const repo = repoKey(projectPath);
     if (outcome.rejectionFeedback) {
       await saveMemory(
         'constraint',
-        projectPath,
+        repo,
         `Review rejection: ${outcome.taskTitle.slice(0, 80)}`,
         `Task "${outcome.taskTitle}" was rejected by the reviewer.\n` +
         `Reviewer feedback (avoid repeating this): ${outcome.rejectionFeedback.slice(0, 600)}`,
@@ -107,7 +124,7 @@ export async function recordTaskOutcome(
     }
     await saveMemory(
       'system_pattern',
-      projectPath,
+      repo,
       `Solved: ${outcome.taskTitle.slice(0, 80)}`,
       parts.join('\n'),
       { derivedFrom: outcome.derivedFrom, isVerified: true, skipDistillation: true },

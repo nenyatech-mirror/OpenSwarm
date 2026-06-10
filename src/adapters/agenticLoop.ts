@@ -285,8 +285,11 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
 
     const results: ToolResult[] = await executeToolCalls(toolCalls, cwd, readCache, { protectedFiles, bashTimeoutMs });
     toolCallCount += toolCalls.length;
-    editToolCount += toolCalls.filter(
-      (tc) => tc.function.name === 'edit_file' || tc.function.name === 'write_file',
+    // Count only SUCCESSFUL edits — a model whose edit_file calls all fail
+    // (old_string not found, protected file) has not modified anything, and
+    // counting attempts would let it slip past the no-edit guard.
+    editToolCount += toolCalls.filter((tc, i) =>
+      (tc.function.name === 'edit_file' || tc.function.name === 'write_file') && !results[i]?.is_error,
     ).length;
 
     // 도구 결과를 메시지에 추가 (길이 초과 시 자동 truncate)
