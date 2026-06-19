@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.0 — 2026-06-19
+
+Runs with **no external SaaS** from a clean install, plus a native ChatGPT-OAuth Codex path.
+
+### Added
+
+- **First-run onboarding wizard (`openswarm init`)** — interactive 3-step setup: AI provider (with inline `auth login`, skipped if already authenticated), task backend (local SQLite or Linear paste-key), and an optional notification channel (Discord/Slack/Telegram/webhook, BYO). Writes `.env` (secrets, `chmod 600`) + `config.yaml` and validates. `--yes`/`--non-interactive` keeps the config-only path for CI. New `promptHelper` (line-event-queue prompts, robust for piped stdin + TTY) and `envFile.writeEnvVars` (upsert, 0600). (INT-1578)
+- **Notifier abstraction** — outbound notifications are decoupled from Discord: `Discord` / `Slack` / `Telegram` / generic `Webhook` / `Noop`, selected by a `notifications` config block and injected via `setNotifier`. `EmbedBuilder` falls back to text/markdown for non-Discord channels. (INT-1576)
+- **Linear-optional task source (`ITaskSource`)** — the autonomous runner + `/plan` cockpit route through `ITaskSource`. With no `LINEAR_API_KEY`, `selectTaskSource` falls back to the existing local SQLite issue store (`~/.openswarm/issues.db`) and drives the runner end-to-end — no external account. `LinearTaskSource` preserves today's behavior exactly (thin delegation). (INT-1577)
+- **Codex model discovery (`openswarm auth models`)** — discovers the Codex models an account can actually use via the OAuth backend (`chatgpt.com/backend-api/codex/models`), with `~/.codex` config/cache and a curated offline fallback; ported from the hermes `codex_models` pattern. `CodexCliAdapter.listModels()`. (INT-1585)
+- **Native Codex Responses adapter (`codex-responses`)** — calls `chatgpt.com/backend-api/codex/responses` (Responses API) via ChatGPT OAuth on OpenSwarm's **own** agentic loop, instead of delegating to the external `codex exec` CLI. Tools/verification stay under OpenSwarm's control, and per-role model tiering (worker/reviewer/planner = big/medium/small) works on a single OAuth. Live-verified (`/responses` 200 + tool-calling e2e). (INT-1586)
+
+### Fixed
+
+- **OAuth `account_id` extraction** — stored `id_token.sub` (an IdP subject, e.g. `google-oauth2|…`) instead of `chatgpt_account_id` from the access_token's `https://api.openai.com/auth` claim, so the Codex backend would 401. Existing profiles need a one-time `openswarm auth login --provider gpt` re-login. (INT-1586)
+- **`pairMode.webhookUrl` validation** — was a strict `z.string().url()`, so an unset `${PAIR_WEBHOOK_URL:-}` (empty string) made `openswarm validate` fail on every generated config (broken since 0.6.0). Now allows an empty string, matching the other optional `webhookUrl` fields. (INT-1578)
+
 ## 0.6.0 — 2026-06-18
 
 ### Added
