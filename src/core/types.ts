@@ -94,7 +94,7 @@ export type SwarmEvent = {
  */
 export type SwarmConfig = {
   /** Default CLI adapter */
-  adapter?: 'codex' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
+  adapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
   /** UI language: 'en' | 'ko' (default: 'en') */
   language: 'en' | 'ko';
   /** Discord bot token */
@@ -260,7 +260,7 @@ export type RoleConfig = {
   /** Whether role is enabled */
   enabled: boolean;
   /** CLI adapter name */
-  adapter?: 'codex' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
+  adapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
   /** Model ID */
   model: string;
   /** Timeout (ms), 0 = unlimited */

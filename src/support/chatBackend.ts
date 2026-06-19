@@ -28,6 +28,13 @@ export const CHAT_MODEL_ALIASES: Record<AdapterName, Record<string, string>> = {
     gpt5: 'gpt-5-codex',
     gpt5codex: 'gpt-5-codex',
   },
+  'codex-responses': {
+    // Codex backend tiers (see `openswarm auth models` for the live list).
+    big: 'gpt-5.5',
+    medium: 'gpt-5.4',
+    small: 'gpt-5.4-mini',
+    codex: 'gpt-5.3-codex',
+  },
   gpt: {
     'gpt-4o': 'gpt-4o',
     'o3': 'o3',
@@ -78,6 +85,7 @@ export function inferProviderFromModel(model?: string): AdapterName {
 
 export function getDefaultChatModel(provider: AdapterName): string {
   if (provider === 'codex') return 'gpt-5-codex';
+  if (provider === 'codex-responses') return 'gpt-5.5';
   if (provider === 'gpt') return 'gpt-4o';
   if (provider === 'local') return 'gemma3:4b';
   if (provider === 'lmstudio') return process.env.LMSTUDIO_MODEL ?? 'local-model';

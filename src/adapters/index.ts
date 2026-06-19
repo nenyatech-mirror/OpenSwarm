@@ -16,6 +16,7 @@ export type {
 
 export { spawnCli } from './base.js';
 export { CodexCliAdapter } from './codex.js';
+export { CodexResponsesAdapter } from './codexResponses.js';
 export { GptCliAdapter } from './gpt.js';
 export { LocalModelAdapter } from './local.js';
 export { LmStudioAdapter } from './lmstudio.js';
@@ -23,6 +24,7 @@ export { OpenRouterCliAdapter } from './openrouter.js';
 export { registerProcess, getProcess, getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } from './processRegistry.js';
 
 import { CodexCliAdapter } from './codex.js';
+import { CodexResponsesAdapter } from './codexResponses.js';
 import { GptCliAdapter } from './gpt.js';
 import { LocalModelAdapter } from './local.js';
 import { LmStudioAdapter } from './lmstudio.js';
@@ -31,6 +33,7 @@ import type { AdapterName, CliAdapter } from './types.js';
 
 const adapters: Record<string, CliAdapter> = {
   codex: new CodexCliAdapter(),
+  'codex-responses': new CodexResponsesAdapter(),
   gpt: new GptCliAdapter(),
   local: new LocalModelAdapter(),
   lmstudio: new LmStudioAdapter(),

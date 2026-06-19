@@ -8,7 +8,7 @@ import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
 
-export type AdapterName = 'codex' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
+export type AdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
 
 /**
  * Raw result from a CLI process execution

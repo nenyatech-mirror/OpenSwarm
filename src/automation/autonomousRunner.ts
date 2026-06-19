@@ -1113,10 +1113,11 @@ export class AutonomousRunner {
       // o-series (o3, o4-mini 등)는 사용 불가
       const isCodexCompatible = current.startsWith('gpt-');
 
-      if (adapter === 'codex') {
+      if (adapter === 'codex' || adapter === 'codex-responses') {
         if (isCodexCompatible) return current;
-        // 비호환 모델(o-series 포함) → 모델 플래그 생략 → Codex 기본값 사용
-        return '';
+        // 비호환 모델(o-series·claude 등). codex CLI는 빈 플래그로 기본값을 위임할 수
+        // 있지만, codex-responses 어댑터는 API model 필드가 필수라 기본 모델로 채운다.
+        return adapter === 'codex-responses' ? 'gpt-5.5' : '';
       }
 
       if (isClaudeModel) return current;
