@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { webFetch, webSearch } from './webTools.js';
+import { isMcpTool, callMcpTool } from '../mcp/mcpClient.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -406,6 +407,15 @@ export async function executeTool(
       }
 
       default:
+        // MCP tools (named `server__tool`) route to their server via the MCP client.
+        if (isMcpTool(name)) {
+          const text = await callMcpTool(name, (args ?? {}) as Record<string, unknown>);
+          return {
+            tool_call_id: callId,
+            content: text,
+            is_error: text.startsWith('MCP error') || text.startsWith('MCP tool not registered'),
+          };
+        }
         return { tool_call_id: callId, content: `Unknown tool: ${name}`, is_error: true };
     }
   } catch (err) {

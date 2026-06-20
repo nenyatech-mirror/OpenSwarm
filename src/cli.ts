@@ -120,23 +120,16 @@ program
 
 program
   .command('chat')
-  .description('Start interactive chat CLI with the configured provider')
+  .description('Start the interactive chat TUI with the configured provider')
   .argument('[session]', 'Session name to load/create (optional)')
-  .option('--tui', 'Enable rich TUI mode (default: simple readline)')
-  .action(async (session?: string, opts?: { tui?: boolean }) => {
-    // Pass session argument via process.argv for chat.ts to pick up
+  .option('--tui', 'Deprecated — chat always uses the TUI now (kept for compatibility)')
+  .action(async (session?: string) => {
+    // Pass the session argument via process.argv for the TUI to pick up.
     if (session) {
       process.argv = [process.argv[0], process.argv[1], session];
     }
-
-    // Use TUI mode if requested
-    if (opts?.tui) {
-      const { main } = await import('./support/chatTui.js');
-      await main();
-    } else {
-      // Legacy readline mode
-      await import('./support/chat.js');
-    }
+    // Always launch the TUI — the legacy readline path is retired.
+    await launchChatTui();
   });
 
 // openswarm exec <prompt>
@@ -180,9 +173,22 @@ program
       return;
     }
 
-    const { startDaemon } = await import('./cli/daemon.js');
+    const { startDaemon, getDaemonStatus, readLogTail } = await import('./cli/daemon.js');
     try {
       const { pid, logFile } = startDaemon();
+      // The child can die immediately on a startup error (bad config, port in
+      // use, throwing dependency). Spawning only proves the OS forked it — wait
+      // briefly and confirm it's actually alive before claiming success, so we
+      // never print "started" for a daemon that `status` will call "not running".
+      await new Promise((r) => setTimeout(r, 1500));
+      if (!getDaemonStatus().running) {
+        console.error('OpenSwarm exited during startup. Recent log:');
+        console.error('────────────────────────────────────────');
+        console.error(readLogTail(25));
+        console.error('────────────────────────────────────────');
+        console.error(`Full log: ${logFile}`);
+        process.exit(1);
+      }
       console.log(`OpenSwarm started in background (pid ${pid}).`);
       console.log(`  logs:    ${logFile}`);
       console.log(`  stop:    openswarm stop`);
@@ -375,12 +381,53 @@ authCmd
     handleAuthLogout(opts.provider);
   });
 
-// 서브커맨드 없이 `openswarm`만 입력 시 → TUI chat 실행
+// 서브커맨드 없이 `openswarm`만 입력 시 → TUI chat 실행 (`openswarm chat`과 동일)
 
-program.action(async () => {
-  const { main } = await import('./support/chatTui.js');
-  await main();
-});
+async function launchChatTui(): Promise<void> {
+  // Auto-start the background daemon so the monitor tabs (Projects/Tasks/Stuck/
+  // Issues) — which are read-only clients of the daemon's :3847 API — have data
+  // to show. If it's already running or fails to start, just continue: the chat
+  // agent itself doesn't depend on the daemon. Done before console muting so the
+  // one-line status is visible.
+  try {
+    const { getDaemonStatus, startDaemon } = await import('./cli/daemon.js');
+    if (!getDaemonStatus().running) {
+      const { pid } = startDaemon();
+      process.stdout.write(`Starting OpenSwarm daemon (pid ${pid}) for the monitor tabs…\n`);
+      await new Promise((r) => setTimeout(r, 1500));
+      if (!getDaemonStatus().running) {
+        process.stdout.write('Daemon did not stay up; monitor tabs may be empty. Run `openswarm status` to see why.\n');
+      }
+    }
+  } catch {
+    // Non-fatal — chat works without the daemon.
+  }
+
+  // chat is a blessed full-screen UI — mute config-load diagnostics
+  // ("Loading config…", "[Config] disabling…") AND blessed's terminfo noise.
+  // blessed 0.1.81 fails to compile xterm-256color's `Setulc` cap and dumps
+  // the function source via console.error on startup + terminal reset (exit);
+  // muting console.error hides it. The TUI renders via blessed and reports
+  // errors into the chat log (not console), so nothing useful is lost. On a
+  // hard exit (Ctrl+C → process.exit) the finally doesn't run, which keeps the
+  // reset noise muted too — exactly what we want.
+  const origLog = console.log;
+  const origWarn = console.warn;
+  const origError = console.error;
+  console.log = () => {};
+  console.warn = () => {};
+  console.error = () => {};
+  try {
+    const { main } = await import('./support/chatTui.js');
+    await main();
+  } finally {
+    console.log = origLog;
+    console.warn = origWarn;
+    console.error = origError;
+  }
+}
+
+program.action(launchChatTui);
 
 // Parse & Execute
 

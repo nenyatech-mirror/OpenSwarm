@@ -182,27 +182,32 @@ function parseSseLine(line: string): SseEvent | null {
   }
 }
 
-/** Read the whole SSE body and reduce it to a chat-shaped response. */
-async function consumeResponsesStream(res: Response): Promise<ChatLikeResponse> {
+/**
+ * Read the whole SSE body and reduce it to a chat-shaped response. When
+ * `onToken` is provided, each `response.output_text.delta` is emitted live so
+ * the chat TUI can stream tokens as they arrive.
+ */
+async function consumeResponsesStream(res: Response, onToken?: (delta: string) => void): Promise<ChatLikeResponse> {
   const events: SseEvent[] = [];
   const reader = res.body?.getReader();
   if (!reader) throw new Error('Codex responses: empty stream body');
 
   const decoder = new TextDecoder();
   let buffer = '';
+  const handle = (ev: SseEvent | null) => {
+    if (!ev) return;
+    events.push(ev);
+    if (onToken && ev.type === 'response.output_text.delta' && ev.delta) onToken(ev.delta);
+  };
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      const ev = parseSseLine(line);
-      if (ev) events.push(ev);
-    }
+    for (const line of lines) handle(parseSseLine(line));
   }
-  const tail = parseSseLine(buffer);
-  if (tail) events.push(tail);
+  handle(parseSseLine(buffer));
 
   return reduceResponsesEvents(events);
 }
@@ -259,7 +264,7 @@ export class CodexResponsesAdapter implements CliAdapter {
     }
 
     const model = options.model ?? DEFAULT_MODEL;
-    const callApi = this.createApiCaller(accessToken, accountId, store, model);
+    const callApi = this.createApiCaller(accessToken, accountId, store, model, options.onToken, options.signal);
 
     const loopOptions: AgenticLoopOptions = {
       systemPrompt: options.systemPrompt,
@@ -270,11 +275,13 @@ export class CodexResponsesAdapter implements CliAdapter {
       maxTurns: options.maxTurns ?? 15,
       timeoutMs: options.timeoutMs || 300000,
       onLog: options.onLog,
-      enableTools: true,
+      enableTools: options.enableTools ?? true,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
+      mcpTools: options.mcpTools,
+      signal: options.signal,
     };
 
     try {
@@ -294,7 +301,14 @@ export class CodexResponsesAdapter implements CliAdapter {
   }
 
   /** Build the agentic-loop callApi: POST /responses + chat↔Responses conversion. */
-  private createApiCaller(initialToken: string, accountId: string, store: AuthProfileStore, model: string) {
+  private createApiCaller(
+    initialToken: string,
+    accountId: string,
+    store: AuthProfileStore,
+    model: string,
+    onToken?: (delta: string) => void,
+    signal?: AbortSignal,
+  ) {
     let token = initialToken;
     let retried = false;
 
@@ -322,6 +336,7 @@ export class CodexResponsesAdapter implements CliAdapter {
             'OpenAI-Beta': 'responses=experimental',
           },
           body: JSON.stringify(body),
+          signal,
         });
 
         if (!res.ok) {
@@ -335,7 +350,7 @@ export class CodexResponsesAdapter implements CliAdapter {
           throw new Error(`Codex responses error (${res.status}): ${errText.slice(0, 500)}`);
         }
 
-        return consumeResponsesStream(res);
+        return consumeResponsesStream(res, onToken);
       };
 
       return doCall(token);

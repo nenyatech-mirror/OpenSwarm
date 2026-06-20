@@ -579,17 +579,22 @@ export function loadConfig(customPath?: string): SwarmConfig {
 /**
  * Validate config (supplementary checks beyond Zod validation)
  */
-export function validateConfig(config: SwarmConfig): { valid: boolean; errors: string[] } {
+export function validateConfig(config: SwarmConfig): { valid: boolean; errors: string[]; warnings: string[] } {
   const errors: string[] = [];
+  const warnings: string[] = [];
 
-  // Verify agent project paths exist
+  // A missing agent project path is NOT fatal: the runner simply skips that
+  // agent (see index.ts), so the daemon still serves the web/monitor API and
+  // any agents whose paths do exist. Killing the whole daemon over a sample/
+  // placeholder agent path (e.g. ~/dev/my-project from `openswarm init`) was
+  // the cause of "started in background" but "is not running".
   for (const agent of config.agents) {
     if (!existsSync(agent.projectPath)) {
-      errors.push(`Agent "${agent.name}" project path does not exist: ${agent.projectPath}`);
+      warnings.push(`Agent "${agent.name}" project path does not exist: ${agent.projectPath} (agent disabled)`);
     }
   }
 
-  // Verify GitHub repo format
+  // Verify GitHub repo format — a malformed repo string is real misconfiguration.
   if (config.githubRepos) {
     for (const repo of config.githubRepos) {
       if (!repo.includes('/')) {
@@ -598,7 +603,7 @@ export function validateConfig(config: SwarmConfig): { valid: boolean; errors: s
     }
   }
 
-  return { valid: errors.length === 0, errors };
+  return { valid: errors.length === 0, errors, warnings };
 }
 
 /**

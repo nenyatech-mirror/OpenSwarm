@@ -14,6 +14,7 @@ import type {
 } from './types.js';
 import { runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopOptions } from './agenticLoop.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
+import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
 
 // 로컬 프로바이더 기본 URL 후보 (우선순위 순)
@@ -145,7 +146,7 @@ export class LocalModelAdapter implements CliAdapter {
     const supportsTools = await this.checkToolSupport(baseUrl, model);
 
     // 에이전틱 루프로 실행
-    const callApi = this.createApiCaller(baseUrl, model);
+    const callApi = this.createApiCaller(baseUrl, model, options.onToken, options.signal);
 
     const loopOptions: AgenticLoopOptions = {
       systemPrompt: options.systemPrompt,
@@ -156,11 +157,13 @@ export class LocalModelAdapter implements CliAdapter {
       maxTurns: options.maxTurns ?? 15,
       timeoutMs: options.timeoutMs || 300000,
       onLog: options.onLog,
-      enableTools: supportsTools,
+      enableTools: (options.enableTools ?? true) && supportsTools,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
+      mcpTools: options.mcpTools,
+      signal: options.signal,
     };
 
     try {
@@ -229,13 +232,14 @@ export class LocalModelAdapter implements CliAdapter {
   /**
    * 로컬 API 호출 함수 생성 (에이전틱 루프에 주입)
    */
-  private createApiCaller(baseUrl: string, model: string) {
+  private createApiCaller(baseUrl: string, model: string, onToken?: (delta: string) => void, signal?: AbortSignal) {
     return async (messages: ChatMessage[], tools: ToolDefinition[]) => {
       const body: Record<string, unknown> = {
         model,
         messages,
         temperature: 0.2,
-        stream: false,
+        stream: true,
+        stream_options: { include_usage: true },
       };
       if (tools.length > 0) {
         body.tools = tools;
@@ -245,6 +249,7 @@ export class LocalModelAdapter implements CliAdapter {
         method: 'POST',
         headers: this.buildHeaders(),
         body: JSON.stringify(body),
+        signal,
       });
 
       if (!res.ok) {
@@ -261,7 +266,7 @@ export class LocalModelAdapter implements CliAdapter {
         throw new Error(`Local API error (${res.status}): ${errText.slice(0, 500)}`);
       }
 
-      return (await res.json()) as OpenAICompatResponse;
+      return consumeChatCompletionsStream(res, onToken);
     };
   }
 
@@ -282,27 +287,7 @@ export class LocalModelAdapter implements CliAdapter {
   }
 }
 
-// OpenAI 호환 응답 타입
-interface OpenAICompatResponse {
-  choices: Array<{
-    message: {
-      content: string | null;
-      role: string;
-      tool_calls?: Array<{
-        id: string;
-        type: 'function';
-        function: { name: string; arguments: string };
-      }>;
-    };
-    finish_reason: string;
-  }>;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-  model?: string;
-}
+// Streamed chat/completions responses are parsed by consumeChatCompletionsStream.
 
 // Worker/Reviewer output parsing lives in ./resultParsing.ts (shared with the
 // gpt, openrouter, and codex adapters — INT-1441).

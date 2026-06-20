@@ -67,7 +67,7 @@ describe('LmStudioAdapter', () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'gemma-4-26b-a4b-it-mlx' }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: 'gemma-4-26b-a4b-it-mlx' }] }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'LM Studio is ready.' }, finish_reason: 'stop' }] }), { status: 200 }));
+      .mockResolvedValueOnce(new Response('data: {"choices":[{"delta":{"role":"assistant","content":"LM Studio is ready."},"finish_reason":"stop"}]}\n\ndata: [DONE]\n', { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
     vi.stubGlobal('fetch', fetchMock);
 
     const adapter = new LmStudioAdapter();

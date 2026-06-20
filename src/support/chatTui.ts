@@ -7,8 +7,8 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { loadConfig } from '../core/config.js';
-import { getDefaultAdapterName, type AdapterName } from '../adapters/index.js';
+import { loadConfig, expandPath } from '../core/config.js';
+import { getDefaultAdapterName, isKnownAdapter, type AdapterName } from '../adapters/index.js';
 import { getDefaultChatModel, resolveChatModel, runChatCompletion, shortenChatModel } from './chatBackend.js';
 import { runPlanCommand, type PlanIO } from './planCommand.js';
 // Constants
@@ -48,6 +48,8 @@ type Session = {
   totalTokens: number;
   createdAt: string;
   updatedAt: string;
+  /** Session goal set via /goal; the agent pursues it autonomously. */
+  goal?: string;
 };
 
 type AppState = {
@@ -63,6 +65,8 @@ type AppState = {
   };
   /** When set, the next submitted input line is routed here (e.g. /plan approval) instead of chat. */
   pendingInput?: (value: string) => void;
+  /** Set while an agent run is in flight; Esc/Ctrl+C aborts it. */
+  activeRun?: AbortController;
 };
 // Session Management
 async function ensureChatDir(): Promise<void> {
@@ -80,11 +84,15 @@ async function loadSession(id: string): Promise<Session | null> {
   const path = resolve(CHAT_DIR, `${id}.json`);
   if (!existsSync(path)) return null;
   const data = JSON.parse(await readFile(path, 'utf-8'));
-  const provider = data.provider ?? inferProvider(undefined, data.model);
+  // Validate the persisted provider — a stale/removed adapter (e.g. `claude`)
+  // must not pass through, or downstream model lookups crash. If it's replaced,
+  // its model no longer applies → use the provider's default.
+  const provider = inferProvider(data.provider, data.model);
+  const model = data.provider === provider && data.model ? data.model : getDefaultChatModel(provider);
   return {
     ...data,
     provider,
-    model: data.model ?? getDefaultChatModel(provider),
+    model,
     totalCost: data.totalCost ?? 0,
     totalTokens: data.totalTokens ?? 0,
   };
@@ -97,7 +105,7 @@ function generateSessionId(): string {
 }
 
 function inferProvider(provider?: AdapterName, model?: string): AdapterName {
-  if (provider) return provider;
+  if (provider && isKnownAdapter(provider)) return provider;
   if (model?.startsWith('gpt-') || model?.includes('codex')) return 'codex';
   return loadDefaultProvider();
 }
@@ -116,13 +124,19 @@ async function callChatModel(
   provider: AdapterName,
   model: string,
   onStream: (text: string, isThinking: boolean) => void,
+  onToolLog?: (line: string) => void,
+  maxTurns?: number,
+  signal?: AbortSignal,
 ): Promise<{ response: string; sessionId: string; cost: number; tokens: number }> {
   const result = await runChatCompletion({
     prompt,
     provider,
     model,
-    timeoutMs: 180000,
+    timeoutMs: 300000,
     onText: onStream,
+    onLog: onToolLog,
+    maxTurns,
+    signal,
   });
 
   return {
@@ -153,6 +167,42 @@ const LOADING_MESSAGES = [
 
 const SPINNER_FRAMES = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
 // UI Components - Claude Code Style
+// Slash commands shown in the typing palette (mirrors handleCommand cases).
+const SLASH_COMMANDS: Array<{ name: string; args: string; desc: string }> = [
+  { name: '/goal', args: '<goal>', desc: 'Set a goal & pursue it autonomously' },
+  { name: '/plan', args: '<goal>', desc: 'Decompose a goal & dispatch to the loop' },
+  { name: '/model', args: '[name]', desc: 'Switch model' },
+  { name: '/provider', args: '[name]', desc: 'Switch provider' },
+  { name: '/clear', args: '', desc: 'Clear the conversation' },
+  { name: '/save', args: '', desc: 'Save the session' },
+  { name: '/export', args: '[path]', desc: 'Export the conversation to a .txt file' },
+  { name: '/help', args: '', desc: 'Show all commands' },
+];
+
+/** Show/hide the slash-command palette based on the current input line. */
+function updateCommandPalette(ui: ReturnType<typeof createUI>): void {
+  const line = (ui.inputBox.getValue().split('\n').pop() ?? '').replace(/^\s+/, '');
+  const hide = () => {
+    if (!ui.commandPalette.hidden) {
+      ui.commandPalette.hide();
+      ui.screen.render();
+    }
+  };
+  if (!line.startsWith('/')) return hide();
+  const q = line.slice(1).toLowerCase();
+  const matches = SLASH_COMMANDS.filter((c) => c.name.slice(1).startsWith(q));
+  if (matches.length === 0) return hide();
+  ui.commandPalette.setContent(
+    matches
+      .map((c) => ` {#60a5fa-fg}{bold}${c.name}{/bold}{/}${c.args ? ` {#a0aec0-fg}${c.args}{/}` : ''}  {#718096-fg}${c.desc}{/}`)
+      .join('\n'),
+  );
+  ui.commandPalette.height = matches.length + 2; // content rows + border
+  ui.commandPalette.show();
+  ui.commandPalette.setFront();
+  ui.screen.render();
+}
+
 function createUI() {
   const screen = blessed.screen({
     smartCSR: true,
@@ -382,6 +432,19 @@ function createUI() {
     },
   });
 
+  // Slash-command palette — floats above the input, shown while typing `/`.
+  const commandPalette = blessed.box({
+    bottom: 6, // above the input box (height 5) + helpBar (height 1)
+    left: 0,
+    width: '60%',
+    height: 3,
+    hidden: true,
+    tags: true,
+    border: { type: 'line' },
+    label: ' {#718096-fg}commands{/} ',
+    style: { fg: '#e2e8f0', bg: '#2d3748', border: { fg: colors.borderActive } },
+  });
+
   screen.append(statusBar);
   screen.append(tabBar);
   screen.append(chatLog);
@@ -392,6 +455,7 @@ function createUI() {
   screen.append(issuesBox);
   screen.append(inputBox);
   screen.append(helpBar);
+  screen.append(commandPalette);
 
   return {
     screen,
@@ -405,6 +469,7 @@ function createUI() {
     issuesBox,
     inputBox,
     helpBar,
+    commandPalette,
   };
 }
 // Tab Management
@@ -801,7 +866,7 @@ function stopSpinner(
   safeRender();
 }
 // Chat Logic
-async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, message: string) {
+async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, message: string, opts?: { maxTurns?: number }) {
   if (!message.trim()) return;
 
   ui.chatLog.log('');
@@ -821,6 +886,8 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
   let contentStartLine = assistantHeaderLine + 1;
 
   const spinnerData = startSpinner(ui);
+  const controller = new AbortController();
+  state.activeRun = controller;
 
   try {
     const result = await callChatModel(
@@ -869,7 +936,26 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
 
         ui.chatLog.setScrollPerc(100);
         safeRender();
-      }
+      },
+      (toolLine: string) => {
+        // Only surface tool executions (🔧 …); skip API-call markers and the
+        // adapter summary line (cost is shown in the footer). Commit the current
+        // streamed block, print the tool line, and move contentStartLine past it so
+        // the 30fps re-render of the next text block doesn't erase it.
+        if (!toolLine.includes('🔧')) return;
+        if (!spinnerStopped) {
+          stopSpinner(ui, spinnerData);
+          spinnerStopped = true;
+        }
+        ui.chatLog.log(`  {#fbbf24-fg}${toolLine.trim()}{/}`);
+        assistantContent = '';
+        contentStartLine = ui.chatLog.getLines().length;
+        lastRenderTime = 0;
+        ui.chatLog.setScrollPerc(100);
+        safeRender();
+      },
+      opts?.maxTurns,
+      controller.signal,
     );
 
     // Ensure spinner is stopped
@@ -922,6 +1008,8 @@ async function sendMessage(state: AppState, ui: ReturnType<typeof createUI>, mes
     ui.chatLog.log('');
     state.session.messages.pop(); // Remove user message on failure
     safeRender();
+  } finally {
+    state.activeRun = undefined;
   }
 }
 // Status Bar Update
@@ -1063,17 +1151,76 @@ async function handleCommand(
       break;
     }
 
+    case 'goal': {
+      const goalText = args.join(' ').trim();
+      if (!goalText) {
+        ui.chatLog.log('');
+        ui.chatLog.log(
+          state.session.goal
+            ? `  {#fbbf24-fg}Current goal:{/} ${state.session.goal}`
+            : '  {#fbbf24-fg}Usage: /goal <goal> — set a goal and pursue it autonomously{/}',
+        );
+        ui.chatLog.log('');
+        safeRender();
+        break;
+      }
+      state.session.goal = goalText;
+      await saveSession(state.session);
+      updateStatusBar(state, ui);
+      ui.chatLog.log('');
+      ui.chatLog.log(`  {#34d399-fg}{bold}Goal set — pursuing autonomously:{/bold}{/} ${goalText}`);
+      ui.chatLog.log('');
+      safeRender();
+      const goalPrompt =
+        `[GOAL] ${goalText}\n\nWork autonomously toward this goal: break it down, use your tools to implement and ` +
+        `verify each step, narrate your reasoning as you go, and keep going until the goal is achieved or you are ` +
+        `genuinely blocked. Do not ask for approval between steps.`;
+      await sendMessage(state, ui, goalPrompt, { maxTurns: 120 });
+      break;
+    }
+
+    case 'export': {
+      const arg = args.join(' ').trim();
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+      const outPath = arg
+        ? expandPath(arg)
+        : resolve(process.cwd(), `openswarm-chat-${state.session.id}-${stamp}.txt`);
+      const lines = [
+        `# OpenSwarm Chat — session "${state.session.id}"`,
+        `# ${state.session.provider}:${state.session.model}  ·  ${now.toISOString()}`,
+        ...(state.session.goal ? [`# Goal: ${state.session.goal}`] : []),
+        '',
+      ];
+      for (const m of state.session.messages) {
+        lines.push(m.role === 'user' ? 'You:' : 'Assistant:', m.content, '');
+      }
+      ui.chatLog.log('');
+      try {
+        await writeFile(outPath, lines.join('\n'), 'utf-8');
+        ui.chatLog.log(`  {#34d399-fg}Exported ${state.session.messages.length} messages → ${outPath}{/}`);
+      } catch (err) {
+        ui.chatLog.log(`  {#ef4444-fg}Export failed: ${err instanceof Error ? err.message : String(err)}{/}`);
+      }
+      ui.chatLog.log('');
+      safeRender();
+      break;
+    }
+
     case 'help':
     case 'h':
     case '?':
       ui.chatLog.log('');
       ui.chatLog.log('  {bold}Available Commands{/bold}');
       ui.chatLog.log('');
+      ui.chatLog.log('    {#60a5fa-fg}/goal{/} <goal>   Set a goal & pursue it autonomously (this session)');
       ui.chatLog.log('    {#60a5fa-fg}/plan{/} <goal>   Decompose a goal & dispatch it to the loop');
       ui.chatLog.log('    {#60a5fa-fg}/clear{/}         Clear conversation');
       ui.chatLog.log('    {#60a5fa-fg}/provider{/} [id] Change provider {#718096-fg}(claude/codex){/}');
       ui.chatLog.log('    {#60a5fa-fg}/model{/} [name]  Change model {#718096-fg}(sonnet/haiku/opus){/}');
       ui.chatLog.log('    {#60a5fa-fg}/save{/} [name]   Save session');
+      ui.chatLog.log('    {#60a5fa-fg}/export{/} [path] Export conversation to a .txt file');
       ui.chatLog.log('    {#60a5fa-fg}/help{/}          Show this help');
       ui.chatLog.log('');
       ui.chatLog.log('  {bold}Navigation{/bold}');
@@ -1195,11 +1342,19 @@ export async function main(): Promise<void> {
   // Ctrl+C: Clear input or exit (Claude Code style)
   let ctrlCPressed = false;
   ui.screen.key(['C-c'], async () => {
+    // While an agent run is in flight, stop it (don't clear input / exit).
+    if (state.activeRun) {
+      state.activeRun.abort();
+      ui.chatLog.log('  {#f59e0b-fg}■ Stopped{/}');
+      safeRender();
+      return;
+    }
     const currentValue = ui.inputBox.getValue();
     if (currentValue && currentValue.trim()) {
       // If input has text, just clear it
       ui.inputBox.clearValue();
       ui.inputBox.focus();
+      ui.commandPalette.hide();
       safeRender();
       ctrlCPressed = false;
     } else {
@@ -1222,6 +1377,13 @@ export async function main(): Promise<void> {
 
   // Escape: Clear input and blur (exit input mode)
   ui.screen.key(['escape'], () => {
+    // While an agent run is in flight, stop it (don't clear input / blur).
+    if (state.activeRun) {
+      state.activeRun.abort();
+      ui.chatLog.log('  {#f59e0b-fg}■ Stopped{/}');
+      safeRender();
+      return;
+    }
     const currentValue = ui.inputBox.getValue();
     if (currentValue && currentValue.trim()) {
       // Clear input if has content
@@ -1229,6 +1391,7 @@ export async function main(): Promise<void> {
     }
     // Blur input box to exit input mode
     ui.chatLog.focus();
+    ui.commandPalette.hide();
     safeRender();
   });
 
@@ -1236,6 +1399,11 @@ export async function main(): Promise<void> {
   ui.chatLog.key(['enter', 'i'], () => {
     ui.inputBox.focus();
     safeRender();
+  });
+
+  // Slash-command palette: refresh on every keystroke in the input box.
+  ui.inputBox.on('keypress', () => {
+    setImmediate(() => updateCommandPalette(ui));
   });
 
   // Shift+Enter: Insert newline (handled by textarea by default)
@@ -1248,6 +1416,7 @@ export async function main(): Promise<void> {
 
     ui.inputBox.clearValue();
     ui.inputBox.focus();
+    ui.commandPalette.hide();
     safeRender();
 
     // An in-progress /plan approval consumes the next line, not chat/commands.

@@ -20,6 +20,7 @@ import {
   type AgenticLoopOptions,
 } from './agenticLoop.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
+import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
@@ -86,6 +87,8 @@ export class OpenRouterCliAdapter implements CliAdapter {
     const model = options.model ?? DEFAULT_MODEL;
     const callApi = createApiCaller(apiKey, model, {
       disableReasoning: options.disableReasoning,
+      onToken: options.onToken,
+      signal: options.signal,
     });
 
     const loopOptions: AgenticLoopOptions = {
@@ -97,11 +100,13 @@ export class OpenRouterCliAdapter implements CliAdapter {
       maxTurns: options.maxTurns ?? 20,
       timeoutMs: options.timeoutMs || 300000,
       onLog: options.onLog,
-      enableTools: true,
+      enableTools: options.enableTools ?? true,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
+      mcpTools: options.mcpTools,
+      signal: options.signal,
     };
 
     try {
@@ -130,30 +135,15 @@ export class OpenRouterCliAdapter implements CliAdapter {
 }
 
 // ----- API caller -----
-
-interface OpenRouterChatResponse {
-  choices: Array<{
-    message: {
-      content: string | null;
-      role: string;
-      tool_calls?: Array<{
-        id: string;
-        type: 'function';
-        function: { name: string; arguments: string };
-      }>;
-    };
-    finish_reason: string;
-  }>;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
+// Streamed chat/completions responses are parsed by consumeChatCompletionsStream.
 
 export interface ApiCallerOptions {
   /** worker 등 기계적 역할: 추론 토큰 비활성화 (지원 모델 한정) */
   disableReasoning?: boolean;
+  /** 스트리밍 토큰 콜백 (chat TUI). 없으면 비스트리밍과 동일하게 동작. */
+  onToken?: (delta: string) => void;
+  /** 사용자 중단(Esc/Ctrl+C) — fetch에 전달. */
+  signal?: AbortSignal;
 }
 
 export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOptions = {}) {
@@ -163,6 +153,8 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       messages: applyPromptCaching(messages, model),
       temperature: 0.2,
       max_tokens: 16384,
+      stream: true,
+      stream_options: { include_usage: true },
     };
     // ZDR(Zero Data Retention) — 데이터를 보존하지 않는 provider로만 라우팅.
     // 단, OpenAI provider는 data_collection:deny 플래그를 거부("Provider returned
@@ -191,6 +183,7 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
         ...ATTRIBUTION_HEADERS,
       },
       body: JSON.stringify(body),
+      signal: opts.signal,
     });
 
     if (!res.ok) {
@@ -198,7 +191,7 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       throw new Error(`OpenRouter API error (${res.status}): ${errText.slice(0, 500)}`);
     }
 
-    return (await res.json()) as OpenRouterChatResponse;
+    return consumeChatCompletionsStream(res, opts.onToken);
   };
 }
 

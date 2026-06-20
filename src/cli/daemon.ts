@@ -143,6 +143,19 @@ export async function stopDaemon(timeoutMs = 10_000): Promise<boolean> {
   );
 }
 
+/**
+ * Read the last `lines` lines of the daemon log. Used by `openswarm start` to
+ * show why the daemon exited when it dies during startup.
+ */
+export function readLogTail(lines = 20): string {
+  try {
+    const content = readFileSync(LOG_FILE, 'utf8');
+    return content.split('\n').slice(-lines).join('\n').trimEnd();
+  } catch {
+    return '(log file unavailable)';
+  }
+}
+
 export function getDaemonStatus(): DaemonStatus {
   const pid = readPidFile();
   if (pid === null || !isProcessAlive(pid)) {

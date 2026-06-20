@@ -65,6 +65,15 @@ export function getDefaultAdapterName(): AdapterName {
 }
 
 /**
+ * True if `name` is a currently-registered adapter. Used to reject stale
+ * persisted provider names (e.g. an old chat session saved `claude` before the
+ * adapter was removed) instead of crashing downstream.
+ */
+export function isKnownAdapter(name: string): name is AdapterName {
+  return Object.prototype.hasOwnProperty.call(adapters, name);
+}
+
+/**
  * List adapters that are currently installed and available.
  */
 export async function listAvailableAdapters(): Promise<string[]> {

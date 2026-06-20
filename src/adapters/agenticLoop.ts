@@ -118,6 +118,10 @@ export interface AgenticLoopOptions {
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Disabled e.g. for SWE-bench integrity. */
   webTools?: boolean;
+  /** MCP tools (named `server__tool`) discovered from mcp.json, exposed alongside the native tools. */
+  mcpTools?: ToolDefinition[];
+  /** Abort the loop (checked each turn) — Esc/Ctrl+C in chat. */
+  signal?: AbortSignal;
 }
 
 /** 루프 실행 결과 */
@@ -164,6 +168,8 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     protectedFiles,
     bashTimeoutMs,
     webTools = true,
+    mcpTools,
+    signal,
   } = options;
 
   const startTime = Date.now();
@@ -185,17 +191,34 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   messages.push({ role: 'user', content: cwdNote + prompt });
 
   const tools = enableTools
-    ? (webTools ? [...TOOL_DEFINITIONS, ...WEB_TOOL_DEFINITIONS] : TOOL_DEFINITIONS)
+    ? [
+        ...TOOL_DEFINITIONS,
+        ...(webTools ? WEB_TOOL_DEFINITIONS : []),
+        ...(mcpTools ?? []),
+      ]
     : [];
   const readCache = createReadCache(); // 루프 단위 read 캐시 (중복 read 차단)
   let toolCallCount = 0;
   let editToolCount = 0; // edit_file/write_file 호출 수 (no-edit 가드용)
+  // 진전 정체 감지: 이번 턴의 도구 호출이 모두 이전과 동일(name+args)하면 새 정보·변경
+  // 없는 반복이다. N턴 연속이면 루프로 보고 조기 종료한다 — 고정 turn 한도(작업 제한)가
+  // 아니라 진전 기반 중단. maxTurns는 비상 천장으로만 남는다.
+  const seenToolCalls = new Set<string>();
+  let noProgressTurns = 0;
+  const NO_PROGRESS_LIMIT = 3;
   let nudgesUsed = 0;
   let apiCallCount = 0;
   let totalTokens = 0;
   let finalText = '';
 
   for (let turn = 0; turn < maxTurns + 1; turn++) {
+    // 사용자 중단 (Esc/Ctrl+C) — 현재 텍스트가 있으면 유지, 없으면 표시만.
+    if (signal?.aborted) {
+      onLog?.('■ Stopped by user');
+      finalText = finalText || '(stopped)';
+      break;
+    }
+
     // 타임아웃 체크
     if (Date.now() > deadline) {
       onLog?.(`⏰ Agentic loop timeout after ${turn} turns`);
@@ -223,6 +246,12 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     try {
       response = await callApi(messages, tools);
     } catch (err) {
+      // User abort (Esc/Ctrl+C) surfaces as the fetch being aborted.
+      if (signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        onLog?.('■ Stopped by user');
+        finalText = finalText || '(stopped)';
+        break;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       onLog?.(`✖ API error: ${msg}`);
       finalText = `API error: ${msg}`;
@@ -298,6 +327,20 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       (tc.function.name === 'edit_file' || tc.function.name === 'write_file') && !results[i]?.is_error,
     ).length;
 
+    // Progress-based stop: if every tool call this turn repeats a prior one
+    // (same name+args → no new info or change), count it as a stalled turn.
+    // N consecutive stalled turns → wrap up via the final-answer turn.
+    if (allToolCallsSeen(toolCalls, seenToolCalls)) {
+      noProgressTurns++;
+      if (noProgressTurns >= NO_PROGRESS_LIMIT) {
+        onLog?.(`⚠ No new progress for ${NO_PROGRESS_LIMIT} turns (repeated tool calls) — wrapping up`);
+        break;
+      }
+    } else {
+      noProgressTurns = 0;
+    }
+    for (const tc of toolCalls) seenToolCalls.add(toolCallKey(tc));
+
     // 도구 결과를 메시지에 추가 (길이 초과 시 자동 truncate)
     for (const result of results) {
       const content = truncateToolResult(result.content);
@@ -324,8 +367,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     messages.push({
       role: 'user',
       content:
-        'Tool budget exhausted. Based on everything you have learned above, give your final ' +
-        'answer NOW as plain text. Do not request any more tools.',
+        "You've reached this turn's step limit, so stop calling tools now. Using everything " +
+        'above, write your final answer as plain text — what you accomplished, the key result, ' +
+        'and anything still left to do. Do not mention step/tool limits or "budget" to the user.',
     });
     try {
       const response = await callApi(messages, []);
@@ -358,6 +402,21 @@ export function loopResultToCliResult(result: AgenticLoopResult): CliRunResult {
     stderr: '',
     durationMs: result.durationMs,
   };
+}
+
+/** Stable key for a tool call (name + args) — used to detect repeated calls. */
+export function toolCallKey(tc: ToolCall): string {
+  return `${tc.function.name}:${tc.function.arguments}`;
+}
+
+/**
+ * True when every tool call this turn was already seen (same name+args), i.e.
+ * pure repetition with no new info or change — a stalled turn. Empty turns are
+ * not stalls (the model produced no tool calls, which ends the loop normally).
+ */
+export function allToolCallsSeen(toolCalls: ToolCall[], seen: Set<string>): boolean {
+  if (toolCalls.length === 0) return false;
+  return toolCalls.every((tc) => seen.has(toolCallKey(tc)));
 }
 
 // ============ 히스토리 압축 (VEGA compaction.py 패턴 이식) ============
