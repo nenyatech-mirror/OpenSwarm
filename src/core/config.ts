@@ -40,7 +40,7 @@ function getConfigSearchPaths(): string[] {
 
 const DEFAULT_HEARTBEAT_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_GITHUB_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const AdapterNameSchema = z.enum(['codex', 'gpt', 'local', 'lmstudio', 'openrouter']);
+const AdapterNameSchema = z.enum(['codex', 'codex-responses', 'gpt', 'local', 'lmstudio', 'openrouter']);
 
 // Zod Schemas
 
@@ -91,8 +91,10 @@ const PairModeConfigSchema = z.object({
   workerTimeoutMs: z.number().positive().default(300000), // 5 min
   /** Reviewer timeout (ms) */
   reviewerTimeoutMs: z.number().positive().default(180000), // 3 min
-  /** Webhook URL (notification on complete/failure) */
-  webhookUrl: z.string().url().optional(),
+  /** Webhook URL (notification on complete/failure). Empty string allowed so an
+   *  unset `${PAIR_WEBHOOK_URL:-}` substitution validates (matches the other
+   *  optional webhookUrl fields, which don't enforce .url()). */
+  webhookUrl: z.string().url().or(z.literal('')).optional(),
   /** Auto Linear status update */
   autoLinearUpdate: z.boolean().default(true),
 }).optional();
@@ -284,10 +286,21 @@ const CIWorkerConfigSchema = z.object({
   maxAgeDays: z.number().positive().default(30),
 }).optional();
 
+// Outbound notification channel (INT-1576). Discord stays the default; Slack/
+// Telegram/webhook are BYO. Distinct from the per-job `notify` boolean above.
+const NotificationsSchema = z.object({
+  channel: z.enum(['discord', 'slack', 'telegram', 'webhook', 'none']).default('discord'),
+  slackWebhookUrl: z.string().optional(),
+  telegramBotToken: z.string().optional(),
+  telegramChatId: z.string().optional(),
+  webhookUrl: z.string().optional(),
+}).optional();
+
 const RawConfigSchema = z.object({
   adapter: AdapterNameSchema.default('codex'),
   language: z.enum(['en', 'ko']).default('en'),
   discord: DiscordConfigSchema,
+  notifications: NotificationsSchema,
   linear: LinearConfigSchema,
   github: GitHubConfigSchema,
   timeWindow: TimeWindowConfigSchema,
@@ -413,6 +426,15 @@ function transformConfig(raw: RawConfig): SwarmConfig {
     discordToken: raw.discord?.token ?? '',
     discordChannelId: raw.discord?.channelId ?? '',
     discordWebhookUrl: raw.discord?.webhookUrl,
+    notifications: raw.notifications
+      ? {
+          channel: raw.notifications.channel,
+          slackWebhookUrl: raw.notifications.slackWebhookUrl,
+          telegramBotToken: raw.notifications.telegramBotToken,
+          telegramChatId: raw.notifications.telegramChatId,
+          webhookUrl: raw.notifications.webhookUrl,
+        }
+      : undefined,
     linearApiKey: raw.linear?.apiKey ?? '',
     linearTeamId: raw.linear?.teamId ?? '',
     agents: raw.agents.map(agent => ({
@@ -557,17 +579,22 @@ export function loadConfig(customPath?: string): SwarmConfig {
 /**
  * Validate config (supplementary checks beyond Zod validation)
  */
-export function validateConfig(config: SwarmConfig): { valid: boolean; errors: string[] } {
+export function validateConfig(config: SwarmConfig): { valid: boolean; errors: string[]; warnings: string[] } {
   const errors: string[] = [];
+  const warnings: string[] = [];
 
-  // Verify agent project paths exist
+  // A missing agent project path is NOT fatal: the runner simply skips that
+  // agent (see index.ts), so the daemon still serves the web/monitor API and
+  // any agents whose paths do exist. Killing the whole daemon over a sample/
+  // placeholder agent path (e.g. ~/dev/my-project from `openswarm init`) was
+  // the cause of "started in background" but "is not running".
   for (const agent of config.agents) {
     if (!existsSync(agent.projectPath)) {
-      errors.push(`Agent "${agent.name}" project path does not exist: ${agent.projectPath}`);
+      warnings.push(`Agent "${agent.name}" project path does not exist: ${agent.projectPath} (agent disabled)`);
     }
   }
 
-  // Verify GitHub repo format
+  // Verify GitHub repo format — a malformed repo string is real misconfiguration.
   if (config.githubRepos) {
     for (const repo of config.githubRepos) {
       if (!repo.includes('/')) {
@@ -576,7 +603,7 @@ export function validateConfig(config: SwarmConfig): { valid: boolean; errors: s
     }
   }
 
-  return { valid: errors.length === 0, errors };
+  return { valid: errors.length === 0, errors, warnings };
 }
 
 /**
@@ -618,6 +645,17 @@ discord:
   channelId: \${DISCORD_CHANNEL_ID}
   webhookUrl: \${DISCORD_WEBHOOK_URL:-}  # optional
 
+# Outbound notification channel (default: discord). BYO credentials.
+# channel: discord | slack | telegram | webhook | none
+notifications:
+  channel: discord
+  # slackWebhookUrl: \${SLACK_WEBHOOK_URL:-}
+  # telegramBotToken: \${TELEGRAM_BOT_TOKEN:-}
+  # telegramChatId: \${TELEGRAM_CHAT_ID:-}
+  # webhookUrl: \${NOTIFY_WEBHOOK_URL:-}
+
+# Task source: when the linear block below is unset, OpenSwarm falls back to a
+# local SQLite issue store (~/.openswarm/issues.db) — no external account needed.
 linear:
   apiKey: \${LINEAR_API_KEY}
   teamId: \${LINEAR_TEAM_ID}

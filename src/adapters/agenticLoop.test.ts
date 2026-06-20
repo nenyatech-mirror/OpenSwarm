@@ -7,7 +7,30 @@
 // ============================================
 
 import { describe, it, expect } from 'vitest';
-import { compactPriorTurns, type ChatMessage } from './agenticLoop.js';
+import { compactPriorTurns, toolCallKey, allToolCallsSeen, type ChatMessage } from './agenticLoop.js';
+import type { ToolCall } from './tools.js';
+
+describe('progress-based stop helpers', () => {
+  const mk = (name: string, args: string): ToolCall => ({ id: 'x', function: { name, arguments: args } });
+
+  it('toolCallKey combines name + args', () => {
+    expect(toolCallKey(mk('read_file', '{"path":"a"}'))).toBe('read_file:{"path":"a"}');
+  });
+
+  it('an empty turn (no tool calls) is not a stall', () => {
+    expect(allToolCallsSeen([], new Set())).toBe(false);
+  });
+
+  it('all calls already seen → stalled turn', () => {
+    const seen = new Set(['read_file:{"path":"a"}']);
+    expect(allToolCallsSeen([mk('read_file', '{"path":"a"}')], seen)).toBe(true);
+  });
+
+  it('any new call (e.g. different path) → progress, not a stall', () => {
+    const seen = new Set(['read_file:{"path":"a"}']);
+    expect(allToolCallsSeen([mk('read_file', '{"path":"a"}'), mk('read_file', '{"path":"b"}')], seen)).toBe(false);
+  });
+});
 
 /** Build a representative tool-using history: system + user + N (assistant→tool) rounds. */
 function buildHistory(rounds: number): ChatMessage[] {

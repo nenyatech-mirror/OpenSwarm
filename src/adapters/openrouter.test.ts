@@ -35,11 +35,10 @@ describe('OpenRouterCliAdapter', () => {
   it('calls /chat/completions with Bearer auth and attribution headers', async () => {
     const fetchMock = vi.fn(async () =>
       new Response(
-        JSON.stringify({
-          choices: [{ message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        }),
-        { status: 200 },
+        'data: {"choices":[{"delta":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}\n\n' +
+          'data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n' +
+          'data: [DONE]\n',
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
       ),
     );
     vi.stubGlobal('fetch', fetchMock);

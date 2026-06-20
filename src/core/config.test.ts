@@ -293,9 +293,11 @@ agents:
       };
 
       const result = validateConfig(config);
-      expect(result.valid).toBe(false);
-      expect(result.errors.length).toBeGreaterThan(0);
-      expect(result.errors[0]).toContain('project path does not exist');
+      // A missing agent path is a non-fatal warning (the agent is disabled),
+      // not an error — so the daemon stays up and serves the monitor API.
+      expect(result.valid).toBe(true);
+      expect(result.warnings.length).toBeGreaterThan(0);
+      expect(result.warnings[0]).toContain('project path does not exist');
 
       // Reset mock
       vi.mocked(existsSync).mockReset();
@@ -349,8 +351,10 @@ agents:
       };
 
       const result = validateConfig(config);
+      // Two missing agent paths → warnings; the malformed GitHub repo → error.
       expect(result.valid).toBe(false);
-      expect(result.errors.length).toBeGreaterThanOrEqual(3);
+      expect(result.errors.length).toBeGreaterThanOrEqual(1);
+      expect(result.warnings.length).toBeGreaterThanOrEqual(2);
 
       // Reset mock
       vi.mocked(existsSync).mockReset();

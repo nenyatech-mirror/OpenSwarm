@@ -187,16 +187,29 @@ export async function runOAuthPkceFlow(options: OAuthFlowOptions = {}): Promise<
           id_token?: string;
         };
 
-        // id_token에서 accountId 추출 (JWT payload)
+        // Codex 백엔드(/responses, /models)는 `chatgpt-account-id` 헤더를 요구한다.
+        // 그 값은 access_token JWT의 `https://api.openai.com/auth` claim 안의
+        // `chatgpt_account_id`다. (과거엔 id_token.sub를 저장했는데, 그건 IdP
+        // subject — 예: `google-oauth2|...` — 라서 codex account_id가 아니다.)
+        // access_token 우선, 없으면 id_token으로 폴백.
         let accountId: string | undefined;
-        if (tokens.id_token) {
+        for (const jwt of [tokens.access_token, tokens.id_token]) {
+          if (!jwt) continue;
           try {
             const payload = JSON.parse(
-              Buffer.from(tokens.id_token.split('.')[1], 'base64url').toString(),
-            );
-            accountId = payload.sub;
+              Buffer.from(jwt.split('.')[1], 'base64url').toString(),
+            ) as Record<string, unknown>;
+            const authClaim = payload['https://api.openai.com/auth'];
+            const candidate =
+              authClaim && typeof authClaim === 'object'
+                ? (authClaim as Record<string, unknown>).chatgpt_account_id
+                : undefined;
+            if (typeof candidate === 'string' && candidate) {
+              accountId = candidate;
+              break;
+            }
           } catch {
-            // id_token 파싱 실패는 무시
+            // JWT 파싱 실패는 무시 — accountId 없이 진행
           }
         }
 

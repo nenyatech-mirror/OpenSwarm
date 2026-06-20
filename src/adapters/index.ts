@@ -16,6 +16,7 @@ export type {
 
 export { spawnCli } from './base.js';
 export { CodexCliAdapter } from './codex.js';
+export { CodexResponsesAdapter } from './codexResponses.js';
 export { GptCliAdapter } from './gpt.js';
 export { LocalModelAdapter } from './local.js';
 export { LmStudioAdapter } from './lmstudio.js';
@@ -23,6 +24,7 @@ export { OpenRouterCliAdapter } from './openrouter.js';
 export { registerProcess, getProcess, getAllProcesses, killProcess, startHealthChecker, stopHealthChecker } from './processRegistry.js';
 
 import { CodexCliAdapter } from './codex.js';
+import { CodexResponsesAdapter } from './codexResponses.js';
 import { GptCliAdapter } from './gpt.js';
 import { LocalModelAdapter } from './local.js';
 import { LmStudioAdapter } from './lmstudio.js';
@@ -31,6 +33,7 @@ import type { AdapterName, CliAdapter } from './types.js';
 
 const adapters: Record<string, CliAdapter> = {
   codex: new CodexCliAdapter(),
+  'codex-responses': new CodexResponsesAdapter(),
   gpt: new GptCliAdapter(),
   local: new LocalModelAdapter(),
   lmstudio: new LmStudioAdapter(),
@@ -59,6 +62,15 @@ export function setDefaultAdapter(name: AdapterName): void {
 
 export function getDefaultAdapterName(): AdapterName {
   return defaultAdapter;
+}
+
+/**
+ * True if `name` is a currently-registered adapter. Used to reject stale
+ * persisted provider names (e.g. an old chat session saved `claude` before the
+ * adapter was removed) instead of crashing downstream.
+ */
+export function isKnownAdapter(name: string): name is AdapterName {
+  return Object.prototype.hasOwnProperty.call(adapters, name);
 }
 
 /**

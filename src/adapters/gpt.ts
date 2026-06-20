@@ -15,6 +15,7 @@ import type {
 import { AuthProfileStore, ensureValidToken } from '../auth/index.js';
 import { runAgenticLoop, loopResultToCliResult, type ChatMessage, type AgenticLoopOptions } from './agenticLoop.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
+import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
 
 const OPENAI_API_BASE = 'https://api.openai.com/v1';
@@ -67,7 +68,7 @@ export class GptCliAdapter implements CliAdapter {
     const model = options.model ?? DEFAULT_MODEL;
 
     // 2. 에이전틱 루프로 실행 (도구 사용 가능)
-    const callApi = this.createApiCaller(accessToken, store, model);
+    const callApi = this.createApiCaller(accessToken, store, model, options.onToken, options.signal);
 
     const loopOptions: AgenticLoopOptions = {
       systemPrompt: options.systemPrompt,
@@ -78,11 +79,13 @@ export class GptCliAdapter implements CliAdapter {
       maxTurns: options.maxTurns ?? 15,
       timeoutMs: options.timeoutMs || 300000,
       onLog: options.onLog,
-      enableTools: true,
+      enableTools: options.enableTools ?? true,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,
       protectedFiles: options.protectedFiles,
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
+      mcpTools: options.mcpTools,
+      signal: options.signal,
     };
 
     try {
@@ -109,6 +112,8 @@ export class GptCliAdapter implements CliAdapter {
     initialToken: string,
     store: AuthProfileStore,
     model: string,
+    onToken?: (delta: string) => void,
+    signal?: AbortSignal,
   ) {
     let token = initialToken;
     let retried = false;
@@ -119,6 +124,8 @@ export class GptCliAdapter implements CliAdapter {
         messages,
         temperature: 0.2,
         max_tokens: 16384,
+        stream: true,
+        stream_options: { include_usage: true },
       };
       if (tools.length > 0) {
         body.tools = tools;
@@ -132,6 +139,7 @@ export class GptCliAdapter implements CliAdapter {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
+          signal,
         });
 
         if (!res.ok) {
@@ -147,7 +155,7 @@ export class GptCliAdapter implements CliAdapter {
           throw new Error(`OpenAI API error (${res.status}): ${errText.slice(0, 500)}`);
         }
 
-        return (await res.json()) as OpenAIChatResponse;
+        return consumeChatCompletionsStream(res, onToken);
       };
 
       return doCall(token);
@@ -164,27 +172,7 @@ export class GptCliAdapter implements CliAdapter {
 
 }
 
-// OpenAI API response type
-
-interface OpenAIChatResponse {
-  choices: Array<{
-    message: {
-      content: string | null;
-      role: string;
-      tool_calls?: Array<{
-        id: string;
-        type: 'function';
-        function: { name: string; arguments: string };
-      }>;
-    };
-    finish_reason: string;
-  }>;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-}
+// Streamed chat/completions responses are parsed by consumeChatCompletionsStream.
 
 async function refreshAndRetry(store: AuthProfileStore): Promise<string> {
   const profile = store.getProfile(PROFILE_KEY);

@@ -2,6 +2,8 @@
 // OpenSwarm - Type Definitions
 // ============================================
 
+import type { NotificationsConfig } from '../notify/notifier.js';
+
 /**
  * Agent session configuration
  */
@@ -92,7 +94,7 @@ export type SwarmEvent = {
  */
 export type SwarmConfig = {
   /** Default CLI adapter */
-  adapter?: 'codex' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
+  adapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
   /** UI language: 'en' | 'ko' (default: 'en') */
   language: 'en' | 'ko';
   /** Discord bot token */
@@ -101,6 +103,8 @@ export type SwarmConfig = {
   discordChannelId: string;
   /** Discord Webhook URL (optional) */
   discordWebhookUrl?: string;
+  /** Outbound notification channel (Discord/Slack/Telegram/webhook) — INT-1576 */
+  notifications?: NotificationsConfig;
   /** Linear API key */
   linearApiKey: string;
   /** Linear team ID */
@@ -256,7 +260,7 @@ export type RoleConfig = {
   /** Whether role is enabled */
   enabled: boolean;
   /** CLI adapter name */
-  adapter?: 'codex' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
+  adapter?: 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
   /** Model ID */
   model: string;
   /** Timeout (ms), 0 = unlimited */

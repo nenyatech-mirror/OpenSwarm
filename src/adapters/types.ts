@@ -4,11 +4,12 @@
 // ============================================
 
 import type { WorkerResult, ReviewResult } from '../agents/agentPair.js';
+import type { ToolDefinition } from './tools.js';
 
 // Re-export for convenience
 export type { WorkerResult, ReviewResult };
 
-export type AdapterName = 'codex' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
+export type AdapterName = 'codex' | 'codex-responses' | 'gpt' | 'local' | 'lmstudio' | 'openrouter';
 
 /**
  * Raw result from a CLI process execution
@@ -62,6 +63,23 @@ export interface CliRunOptions {
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Set false for SWE-bench integrity. */
   webTools?: boolean;
+  /**
+   * Expose the file/bash tool set to the agentic loop. Defaults to each adapter's
+   * normal behavior (usually on). Set false for plain conversational completion
+   * (the chat CLI) so the model answers directly instead of running tools.
+   */
+  enableTools?: boolean;
+  /**
+   * Streaming token callback. Adapters that stream (e.g. codex-responses over the
+   * Responses API) invoke this with each text delta as it arrives, so the chat
+   * TUI can render tokens live instead of waiting for the full reply. Adapters
+   * that don't stream simply ignore it.
+   */
+  onToken?: (delta: string) => void;
+  /** MCP tools (named `server__tool`) to expose to the agentic loop, from mcp.json. */
+  mcpTools?: ToolDefinition[];
+  /** Abort the run (and in-flight API/stream) — e.g. Esc/Ctrl+C in chat. */
+  signal?: AbortSignal;
 }
 
 /**

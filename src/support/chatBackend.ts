@@ -11,6 +11,12 @@ export interface ChatCompletionOptions {
   sessionId?: string;
   timeoutMs?: number;
   onText?: (text: string, isThinking: boolean) => void;
+  /** Tool-execution log from the agentic loop (`🔧 name: args`) for the chat UI. */
+  onLog?: (line: string) => void;
+  /** Max agentic turns (default 25); raised for autonomous /goal pursuit. */
+  maxTurns?: number;
+  /** Abort the run (Esc/Ctrl+C). */
+  signal?: AbortSignal;
 }
 
 export interface ChatCompletionResult {
@@ -27,6 +33,13 @@ export const CHAT_MODEL_ALIASES: Record<AdapterName, Record<string, string>> = {
     codex: 'gpt-5-codex',
     gpt5: 'gpt-5-codex',
     gpt5codex: 'gpt-5-codex',
+  },
+  'codex-responses': {
+    // Codex backend tiers (see `openswarm auth models` for the live list).
+    big: 'gpt-5.5',
+    medium: 'gpt-5.4',
+    small: 'gpt-5.4-mini',
+    codex: 'gpt-5.3-codex',
   },
   gpt: {
     'gpt-4o': 'gpt-4o',
@@ -78,6 +91,7 @@ export function inferProviderFromModel(model?: string): AdapterName {
 
 export function getDefaultChatModel(provider: AdapterName): string {
   if (provider === 'codex') return 'gpt-5-codex';
+  if (provider === 'codex-responses') return 'gpt-5.5';
   if (provider === 'gpt') return 'gpt-4o';
   if (provider === 'local') return 'gemma3:4b';
   if (provider === 'lmstudio') return process.env.LMSTUDIO_MODEL ?? 'local-model';
@@ -97,11 +111,80 @@ export function shortenChatModel(model: string): string {
   return model;
 }
 
+/**
+ * API-based adapters (gpt/openrouter/local/codex-responses) execute via run(),
+ * not a shell — their buildCommand is a stub, so spawning it returns nothing
+ * ("No response"). Route chat through run() as a plain, tool-free single turn.
+ */
+async function runChatViaAdapter(
+  adapter: ReturnType<typeof getAdapter>,
+  provider: AdapterName,
+  model: string,
+  cwd: string,
+  options: ChatCompletionOptions,
+): Promise<ChatCompletionResult> {
+  // run() adapters take the prompt as TEXT (it becomes the agentic-loop user
+  // message) — unlike the codex CLI path, which treats options.prompt as a file
+  // path to `cat`. Pass the message text directly.
+  //
+  // chat runs as a tool-using coding agent: file/bash/web tools enabled, multi-turn,
+  // so it can actually read/edit/run in the working directory. Tokens stream via
+  // onToken; tool executions surface through onLog.
+  // Expose any MCP servers configured in ~/.openswarm/mcp.json as tools (cached).
+  const { getMcpTools } = await import('../mcp/mcpClient.js');
+  const mcpTools = await getMcpTools().catch(() => []);
+
+  let streamed = false;
+  const raw = await adapter.run!({
+    prompt: options.prompt,
+    cwd,
+    model,
+    systemPrompt:
+      'You are a capable coding assistant operating in the user\'s current working directory, with tools to ' +
+      'read/search/edit/create files, run shell commands, and call configured MCP server tools (named `server__tool`). ' +
+      'Work like a thoughtful pair programmer who thinks out loud. Before each tool call, write one short sentence ' +
+      'saying what you are about to do and why (e.g. "To find where X is defined, I\'ll search the source."). After a ' +
+      'tool returns, briefly note what you found and your next step, then continue. Actually use the tools to perform ' +
+      'the task — never just describe it. Keep narration to a sentence or two between actions, not essays. ' +
+      'For a trivial question with no task, just answer directly without tools.',
+    enableTools: true,
+    webTools: true,
+    mcpTools,
+    // A high safety ceiling, not a task limit — normal work ends when the model
+    // stops calling tools; the progress-based stop catches stuck loops earlier.
+    maxTurns: options.maxTurns ?? 80,
+    timeoutMs: options.timeoutMs ?? 300000,
+    // Stream tokens live when the adapter supports it (codex-responses / chat
+    // completions); the chat TUI renders each delta as it arrives.
+    onToken: options.onText
+      ? (delta) => {
+          streamed = true;
+          options.onText!(delta, false);
+        }
+      : undefined,
+    // Tool executions (🔧 …) surface to the chat UI.
+    onLog: options.onLog,
+    signal: options.signal,
+  });
+  if (raw.exitCode !== 0 && !raw.stdout.trim()) {
+    throw new Error(raw.stderr.trim() || `${provider} exited with code ${raw.exitCode}`);
+  }
+  const text = raw.stdout.trim();
+  // Non-streaming adapters emit nothing via onToken — flush the full reply once.
+  if (!streamed) options.onText?.(text, false);
+  return { response: text || '[No response]', provider, model };
+}
+
 export async function runChatCompletion(options: ChatCompletionOptions): Promise<ChatCompletionResult> {
   const provider = options.provider ?? inferProviderFromModel(options.model);
   const model = resolveChatModel(options.model, provider);
   const adapter = getAdapter(provider);
   const cwd = options.cwd ?? process.cwd();
+
+  if (typeof adapter.run === 'function') {
+    return runChatViaAdapter(adapter, provider, model, cwd, options);
+  }
+
   const promptFile = `/tmp/openswarm-chat-${Date.now()}.txt`;
   await writeFile(promptFile, options.prompt);
 

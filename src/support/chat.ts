@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { loadConfig } from '../core/config.js';
-import { getDefaultAdapterName, type AdapterName } from '../adapters/index.js';
+import { getDefaultAdapterName, isKnownAdapter, type AdapterName } from '../adapters/index.js';
 import { getDefaultChatModel, resolveChatModel, runChatCompletion, shortenChatModel } from './chatBackend.js';
 import { runPlanCommand, type PlanIO } from './planCommand.js';
 
@@ -51,10 +51,14 @@ async function loadSession(id: string): Promise<Session | null> {
   if (!existsSync(path)) return null;
   const raw = JSON.parse(await readFile(path, 'utf-8')) as Partial<Session>;
   const provider = inferProvider(raw.provider, raw.model);
+  // If the persisted provider was stale (e.g. a removed `claude` adapter) the
+  // resolved provider differs — its model no longer applies, so fall back to the
+  // provider's default instead of carrying a mismatched model.
+  const model = raw.provider === provider && raw.model ? raw.model : getDefaultChatModel(provider);
   return {
     id: raw.id || id,
     provider,
-    model: raw.model || getDefaultChatModel(provider),
+    model,
     messages: Array.isArray(raw.messages) ? raw.messages : [],
     createdAt: raw.createdAt || new Date().toISOString(),
     updatedAt: raw.updatedAt || new Date().toISOString(),
@@ -325,7 +329,7 @@ function createSession(id: string, provider: AdapterName): Session {
 }
 
 function inferProvider(provider?: AdapterName, model?: string): AdapterName {
-  if (provider) return provider;
+  if (provider && isKnownAdapter(provider)) return provider;
   if (model?.startsWith('gpt-') || model?.includes('codex')) return 'codex';
   return loadDefaultProvider();
 }

@@ -21,7 +21,7 @@ if (envLoad.path !== null) {
 delete process.env['CLAUDECODE'];
 delete process.env['CLAUDE_CODE_ENTRYPOINT'];
 
-import { readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, validateConfig } from './core/config.js';
@@ -53,6 +53,19 @@ async function main(): Promise<void> {
 
   // Validate configuration
   const validation = validateConfig(config);
+
+  // Non-fatal warnings (e.g. an agent's project path is missing): surface them
+  // and drop those agents so the runner doesn't choke, but keep the daemon up
+  // so the web/monitor API (port 3847) stays available.
+  if (validation.warnings.length > 0) {
+    console.warn('Configuration warnings:');
+    for (const warning of validation.warnings) {
+      console.warn(`  - ${warning}`);
+    }
+    config.agents = config.agents.filter((a) => existsSync(a.projectPath));
+    console.warn('');
+  }
+
   if (!validation.valid) {
     console.error('Configuration errors:');
     for (const error of validation.errors) {
