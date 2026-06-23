@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@intrect/openswarm.svg)](https://www.npmjs.com/package/@intrect/openswarm)
 [![npm downloads](https://img.shields.io/npm/dm/@intrect/openswarm.svg)](https://www.npmjs.com/package/@intrect/openswarm)
-[![license](https://img.shields.io/npm/l/@intrect/openswarm.svg)](LICENSE)
+[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![SWE-bench Lite](https://img.shields.io/badge/SWE--bench_Lite-hybrid_3%2F3_resolved-2ea44f)](benchmarks/RUBRIC.md)
 [![GitHub Discussions](https://img.shields.io/github/discussions/unohee/OpenSwarm?logo=github&label=discussions)](https://github.com/unohee/OpenSwarm/discussions)
 
@@ -116,25 +116,21 @@ For autonomous operation (Linear issue processing, Discord control, PR auto-impr
 
 ### Configuration
 
-> 💡 The fastest path is `openswarm init` (interactive — see [What `openswarm init` sets up](#what-openswarm-init-sets-up)). The steps below are the manual equivalent.
+After the global install, run the wizard **in the directory you want the daemon to manage** — it writes everything for you:
 
 ```bash
-git clone https://github.com/unohee/OpenSwarm.git
-cd OpenSwarm
-npm install
-cp config.example.yaml config.yaml
+openswarm init      # writes config.yaml + .env (provider, task backend, notifications)
+openswarm doctor    # verify providers, native deps, ports
 ```
 
-Create a `.env` file:
+See [What `openswarm init` sets up](#what-openswarm-init-sets-up) for the prompts. Prefer to edit by hand? `config.yaml` supports `${VAR}` / `${VAR:-default}` substitution (resolved from `.env`) and is validated with Zod. A minimal `.env` (the wizard writes only what your choices need):
 
 ```bash
-DISCORD_TOKEN=your-discord-bot-token
-DISCORD_CHANNEL_ID=your-channel-id
-LINEAR_API_KEY=your-linear-api-key
+LINEAR_API_KEY=your-linear-api-key      # or: openswarm auth login --provider linear
 LINEAR_TEAM_ID=your-linear-team-id
+DISCORD_TOKEN=your-discord-bot-token    # only if you chose the discord notifier
+DISCORD_CHANNEL_ID=your-channel-id
 ```
-
-`config.yaml` supports `${VAR}` / `${VAR:-default}` substitution and is validated with Zod schemas.
 
 ### Key configuration sections
 
@@ -204,26 +200,17 @@ autonomous:
 
 ### Running the daemon
 
-#### macOS launchd service (recommended)
+With the global install, the `openswarm` CLI manages the daemon directly — no repo or `npm run` scripts needed:
 
 ```bash
-npm run service:install    # Build and install as system service
-npm run service:start      # Start
-npm run service:stop       # Stop
-npm run service:restart    # Restart
-npm run service:status     # Status and recent logs
-npm run service:logs       # stdout (follow mode)
-npm run service:errors     # stderr (follow mode)
-npm run service:uninstall  # Uninstall
+openswarm start               # start the daemon in the background
+openswarm start --foreground  # run attached (logs stream to the terminal)
+openswarm status              # pid, uptime, log path
+openswarm stop                # stop the daemon
+openswarm dash                # open the web dashboard (:3847)
 ```
 
-#### Manual
-
-```bash
-npm run build && npm start   # Production
-npm run dev                  # Development (tsx watch)
-docker compose up -d         # Docker
-```
+> **From source / development** (contributors): clone the repo and use the `npm run …` scripts (`npm run dev`, `npm start`, `npm run service:install` for a macOS launchd service, `docker compose up -d`). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
