@@ -1,7 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { chatToResponsesInput, toolsToResponsesTools, reduceResponsesEvents } from './codexResponses.js';
+import { chatToResponsesInput, toolsToResponsesTools, reduceResponsesEvents, resolveReasoningEffort, substituteSpark } from './codexResponses.js';
 import type { ChatMessage } from './agenticLoop.js';
 import type { ToolDefinition } from './tools.js';
+
+describe('substituteSpark', () => {
+  it('replaces gpt-5.3-codex-spark with the safe cheap model', () => {
+    expect(substituteSpark('gpt-5.3-codex-spark')).toBe('gpt-5.4-mini');
+  });
+  it('leaves every other model untouched', () => {
+    for (const m of ['gpt-5.4-mini', 'gpt-5.4', 'gpt-5.5', 'gpt-5-codex']) {
+      expect(substituteSpark(m)).toBe(m);
+    }
+  });
+});
 
 describe('chatToResponsesInput', () => {
   it('lifts system messages into instructions and keeps user/assistant as input', () => {
@@ -66,7 +77,15 @@ describe('reduceResponsesEvents', () => {
     expect(res.choices[0].message.content).toBe('Hello');
     expect(res.choices[0].message.tool_calls).toBeUndefined();
     expect(res.choices[0].finish_reason).toBe('stop');
-    expect(res.usage).toEqual({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 });
+    expect(res.usage).toEqual({ prompt_tokens: 5, completion_tokens: 2, total_tokens: 7, cached_tokens: 0 });
+  });
+
+  it('surfaces cached_tokens from input_tokens_details (prompt-cache observability)', () => {
+    const res = reduceResponsesEvents([
+      { type: 'response.output_text.delta', delta: 'ok' },
+      { type: 'response.completed', response: { usage: { input_tokens: 1000, output_tokens: 10, input_tokens_details: { cached_tokens: 800 } } } },
+    ]);
+    expect(res.usage).toEqual({ prompt_tokens: 1000, completion_tokens: 10, total_tokens: 1010, cached_tokens: 800 });
   });
 
   it('assembles a function_call from added + arguments.delta, keyed by item id, emitting call_id', () => {
@@ -91,3 +110,20 @@ describe('reduceResponsesEvents', () => {
     expect(res.choices[0].message.tool_calls![0].function.arguments).toBe('{"cmd":"ls"}');
   });
 });
+
+describe('resolveReasoningEffort — jobProfile effort wiring', () => {
+  it('explicit profile effort wins over disableReasoning', () => {
+    expect(resolveReasoningEffort('high', true)).toBe('high');
+    expect(resolveReasoningEffort('high', false)).toBe('high');
+    expect(resolveReasoningEffort('low', false)).toBe('low');
+  });
+
+  it('falls back to low when reasoning is disabled (worker default)', () => {
+    expect(resolveReasoningEffort(undefined, true)).toBe('low');
+  });
+
+  it('falls back to medium otherwise', () => {
+    expect(resolveReasoningEffort(undefined, false)).toBe('medium');
+    expect(resolveReasoningEffort(undefined, undefined)).toBe('medium');
+  });
+})

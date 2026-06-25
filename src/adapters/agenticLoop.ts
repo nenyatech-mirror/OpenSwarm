@@ -6,7 +6,7 @@
 //          VEGA token_count.py 패턴 이식 — 토큰 기반 히스토리 압축.
 // ============================================
 
-import { TOOL_DEFINITIONS, executeToolCalls, createReadCache, type ToolCall, type ToolResult, type ToolDefinition } from './tools.js';
+import { TOOL_DEFINITIONS, APPLY_PATCH_TOOL, executeToolCalls, createReadCache, type ToolCall, type ToolResult, type ToolDefinition } from './tools.js';
 import { WEB_TOOL_DEFINITIONS } from './webTools.js';
 import type { CliRunResult } from './types.js';
 
@@ -76,6 +76,8 @@ interface ChatCompletionResponse {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    /** Cached input tokens (prompt-cache hits). Subset of prompt_tokens. */
+    cached_tokens?: number;
   };
 }
 
@@ -118,6 +120,9 @@ export interface AgenticLoopOptions {
   bashTimeoutMs?: number;
   /** Expose web_fetch + web_search tools (default true). Disabled e.g. for SWE-bench integrity. */
   webTools?: boolean;
+  /** Expose the apply_patch (V4A) tool — codex adapters only (codex models are
+   * RLHF-trained on V4A; non-codex models emit malformed V4A). Default false. */
+  applyPatch?: boolean;
   /** MCP tools (named `server__tool`) discovered from mcp.json, exposed alongside the native tools. */
   mcpTools?: ToolDefinition[];
   /** Abort the loop (checked each turn) — Esc/Ctrl+C in chat. */
@@ -134,6 +139,8 @@ export interface AgenticLoopResult {
   apiCallCount: number;
   /** 총 토큰 사용량 (추적 가능한 경우) */
   totalTokens: number;
+  /** 캐시 적중 입력 토큰 누적 (totalTokens의 부분집합) — prompt-cache 효율 측정용 */
+  cachedTokens: number;
   /** 소요 시간 (ms) */
   durationMs: number;
 }
@@ -168,6 +175,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     protectedFiles,
     bashTimeoutMs,
     webTools = true,
+    applyPatch = false,
     mcpTools,
     signal,
   } = options;
@@ -193,6 +201,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   const tools = enableTools
     ? [
         ...TOOL_DEFINITIONS,
+        ...(applyPatch ? [APPLY_PATCH_TOOL] : []),
         ...(webTools ? WEB_TOOL_DEFINITIONS : []),
         ...(mcpTools ?? []),
       ]
@@ -206,9 +215,15 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   const seenToolCalls = new Set<string>();
   let noProgressTurns = 0;
   const NO_PROGRESS_LIMIT = 3;
-  let nudgesUsed = 0;
+  // Two independent nudge budgets — they fire for different reasons and must NOT
+  // share a counter. read-loop nudges (mid-loop, "stop reading and edit") used to
+  // drain the same budget as the finish-turn no-edit guard, so a read-heavy run
+  // could exhaust it and then slip past the guard, ending analysis-only. (INT-1925)
+  let noEditNudgesUsed = 0;
+  let readLoopNudgesUsed = 0;
   let apiCallCount = 0;
   let totalTokens = 0;
+  let cachedTokens = 0;
   let finalText = '';
 
   for (let turn = 0; turn < maxTurns + 1; turn++) {
@@ -235,6 +250,12 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       if (msgTokens > compactTokenThreshold) {
         onLog?.(`📦 Compacting history (${messages.length} msgs, ${msgTokens} tokens > ${compactTokenThreshold})`);
         compactPriorTurns(messages, keepRecentMessages);
+        // Compaction drops prior read content from the model's view, so the read
+        // cache's premise ("content is already earlier in the conversation") no
+        // longer holds — a stub re-read would leave the model without the file
+        // contents it needs for edit_file's old_string. Clear it so the next
+        // read returns full content again. (INT-1929)
+        readCache.store.clear();
       }
     }
 
@@ -260,6 +281,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
 
     if (response.usage) {
       totalTokens += response.usage.prompt_tokens + response.usage.completion_tokens;
+      cachedTokens += response.usage.cached_tokens ?? 0;
     }
 
     const choice = response.choices?.[0];
@@ -275,9 +297,9 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
       // no-edit 종료 가드 — 수정 필수 작업인데 edit/write를 한 번도 안 하고 끝내려 하면
       // 되밀어 계속하게 한다(경량 모델의 조기 결론 패턴 차단).
-      if (editToolCount === 0 && nudgesUsed < nudgeMaxOnNoEdit) {
-        nudgesUsed++;
-        onLog?.(`↩ No-edit guard: model tried to finish without editing (nudge ${nudgesUsed}/${nudgeMaxOnNoEdit})`);
+      if (editToolCount === 0 && noEditNudgesUsed < nudgeMaxOnNoEdit) {
+        noEditNudgesUsed++;
+        onLog?.(`↩ No-edit guard: model tried to finish without editing (nudge ${noEditNudgesUsed}/${nudgeMaxOnNoEdit})`);
         messages.push({ role: 'assistant', content: assistantMsg.content ?? '' });
         messages.push({
           role: 'user',
@@ -324,7 +346,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     // (old_string not found, protected file) has not modified anything, and
     // counting attempts would let it slip past the no-edit guard.
     editToolCount += toolCalls.filter((tc, i) =>
-      (tc.function.name === 'edit_file' || tc.function.name === 'write_file') && !results[i]?.is_error,
+      (tc.function.name === 'edit_file' || tc.function.name === 'write_file' || tc.function.name === 'apply_patch') && !results[i]?.is_error,
     ).length;
 
     // Progress-based stop: if every tool call this turn repeats a prior one
@@ -352,6 +374,22 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
       if (result.is_error) {
         onLog?.(`  ✖ ${content.slice(0, 100)}`);
       }
+    }
+
+    // Early read-loop nudge (ported from stranded feat/v0.7.0 8a1420f): a read-heavy
+    // model can burn its whole budget reading/searching and never edit — the
+    // finish-turn no-edit guard above never engages because it never tries to finish.
+    // Fire DURING the loop at a fixed early turn so the model still has budget to edit.
+    if (shouldNudgeReadLoop(editToolCount, readLoopNudgesUsed, nudgeMaxOnNoEdit, turn)) {
+      readLoopNudgesUsed++;
+      onLog?.(`↩ Read-loop nudge: turn ${turn}, no edits yet (nudge ${readLoopNudgesUsed}/${nudgeMaxOnNoEdit})`);
+      messages.push({
+        role: 'user',
+        content:
+          'You have spent several turns reading/searching with ZERO edits. You have enough ' +
+          'context now — STOP reading and apply the fix with edit_file immediately, then verify. ' +
+          'Do not read more files unless an edit actually fails.',
+      });
     }
   }
 
@@ -388,6 +426,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
     toolCallCount,
     apiCallCount,
     totalTokens,
+    cachedTokens,
     durationMs: Date.now() - startTime,
   };
 }
@@ -417,6 +456,23 @@ export function toolCallKey(tc: ToolCall): string {
 export function allToolCallsSeen(toolCalls: ToolCall[], seen: Set<string>): boolean {
   if (toolCalls.length === 0) return false;
   return toolCalls.every((tc) => seen.has(toolCallKey(tc)));
+}
+
+/**
+ * Fixed early turn after which a read-heavy worker with zero edits gets nudged to
+ * act. Ported from stranded feat/v0.7.0 (8a1420f): the old guard fired at
+ * maxTurns-2 (too late). Fire EARLY so the model still has budget to apply edits.
+ */
+export const READ_LOOP_NUDGE_AT = 6;
+
+/** True when a worker has read/searched past the early budget with no edits yet. */
+export function shouldNudgeReadLoop(
+  editToolCount: number,
+  nudgesUsed: number,
+  nudgeMax: number,
+  turn: number,
+): boolean {
+  return editToolCount === 0 && nudgesUsed < nudgeMax && turn >= READ_LOOP_NUDGE_AT;
 }
 
 // ============ 히스토리 압축 (VEGA compaction.py 패턴 이식) ============
@@ -494,8 +550,15 @@ export function compactPriorTurns(messages: ChatMessage[], keepRecent = 8): void
 
 function summarizeToolArgs(name: string, args: Record<string, unknown>): string {
   switch (name) {
-    case 'read_file':
-      return String(args.path ?? '');
+    case 'read_file': {
+      // Include offset/limit so a chunked walk of a large file (advancing offsets
+      // = legitimate investigation) is distinguishable from an identical re-read
+      // (a real loop). Without this the log hides the signal needed to tell them
+      // apart, and the turn-count nudge/maxTurns may cut a still-progressing read.
+      const off = args.offset != null ? ` @${args.offset}` : '';
+      const lim = args.limit != null ? `+${args.limit}` : '';
+      return `${String(args.path ?? '')}${off}${lim}`;
+    }
     case 'write_file':
       return String(args.path ?? '');
     case 'edit_file':

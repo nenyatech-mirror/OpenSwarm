@@ -24,6 +24,17 @@ const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses';
 const DEFAULT_MODEL = 'gpt-5.5';
 const PROFILE_KEY = 'openai-gpt:default';
 
+// gpt-5.3-codex-spark read-paralyzes in our agentic worker harness — 0 edits at 458k
+// tokens across edit_file AND apply_patch AND nudge AND guidance (verified 2026-06-25),
+// while every other codex model from gpt-5.4-mini up edits fine. It must NEVER run as a
+// worker here, whether picked by default or requested explicitly — substitute the
+// cheapest capable model.
+const SPARK_MODEL = 'gpt-5.3-codex-spark';
+const SAFE_CHEAP_MODEL = 'gpt-5.4-mini';
+export function substituteSpark(model: string): string {
+  return model === SPARK_MODEL ? SAFE_CHEAP_MODEL : model;
+}
+
 // ---- Responses API wire types (the subset we send/receive) ----
 
 interface ResponsesTool {
@@ -38,13 +49,25 @@ type ResponsesInputItem =
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
   | { type: 'function_call_output'; call_id: string; output: string };
 
+/**
+ * Resolve the reasoning effort for a Responses API request. An explicit effort
+ * (from a jobProfile) always wins; otherwise the worker's disableReasoning flag
+ * picks the cheap floor ('low'), and everything else uses 'medium'.
+ */
+export function resolveReasoningEffort(
+  reasoningEffort?: 'low' | 'medium' | 'high',
+  disableReasoning?: boolean,
+): 'low' | 'medium' | 'high' {
+  return reasoningEffort ?? (disableReasoning ? 'low' : 'medium');
+}
+
 /** The agenticLoop callApi return shape (structurally equals its ChatCompletionResponse). */
 interface ChatLikeResponse {
   choices: Array<{
     message: { role: string; content: string | null; tool_calls?: ApiToolCallShape[] };
     finish_reason: string;
   }>;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cached_tokens?: number };
 }
 
 interface ApiToolCallShape {
@@ -143,7 +166,8 @@ export function reduceResponsesEvents(events: SseEvent[]): ChatLikeResponse {
         if (u) {
           const pt = u.input_tokens ?? 0;
           const ct = u.output_tokens ?? 0;
-          usage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: pt + ct };
+          const cached = u.input_tokens_details?.cached_tokens ?? 0;
+          usage = { prompt_tokens: pt, completion_tokens: ct, total_tokens: pt + ct, cached_tokens: cached };
         }
         break;
       }
@@ -270,8 +294,15 @@ export class CodexResponsesAdapter implements CliAdapter {
 
   /** Default = top model from the Codex OAuth catalog (live/local), else constant. */
   async getDefaultModel(): Promise<string> {
-    const [first] = await getCodexModelIds();
-    return first ?? DEFAULT_MODEL;
+    // gpt-5.3-codex-spark read-paralyzes in our agentic worker harness — 0 edits at
+    // 458k tokens (verified 2026-06-25), while every other codex model from
+    // gpt-5.4-mini up edits fine (mini: 182k, 2 apply_patch). It's the live list's
+    // first entry, so a no-model fallthrough (e.g. a task with no estimate that
+    // matches no jobProfile) would silently pick the one broken model. Exclude it and
+    // prefer the cheapest capable model. Roles/profiles that pass an explicit model
+    // are unaffected.
+    const ids = (await getCodexModelIds()).filter((m) => m !== SPARK_MODEL);
+    return ids.find((m) => m === SAFE_CHEAP_MODEL) ?? ids[0] ?? DEFAULT_MODEL;
   }
 
   async run(options: CliRunOptions): Promise<CliRunResult> {
@@ -297,11 +328,20 @@ export class CodexResponsesAdapter implements CliAdapter {
       };
     }
 
-    const model = options.model ?? await this.getDefaultModel();
+    const requestedModel = options.model ?? await this.getDefaultModel();
+    const model = substituteSpark(requestedModel);
+    if (model !== requestedModel) {
+      options.onLog?.(`[codex-responses] ${requestedModel} read-paralyzes in the agentic harness — using ${model} instead.`);
+    }
     // Stream the model's reasoning summary to the live log as 💭 thoughts.
     const onReasoning = options.onLog ? (line: string) => options.onLog!(`💭 ${line}`) : undefined;
+    // Stable prompt_cache_key so every turn of THIS run routes to the same cache
+    // node — the static prefix (systemPrompt + worker prompt with File Map /
+    // repoMemories / completionCriteria) then reuses the cache across tool turns.
+    // Keyed by task+stage+model so concurrent tasks don't collide on one node.
+    const cacheKey = `osw-${options.processContext?.taskId ?? 'cli'}-${options.processContext?.stage ?? 'run'}-${model}`;
     const callApi = this.createApiCaller(
-      accessToken, accountId, store, model, options.onToken, options.signal, onReasoning, options.disableReasoning,
+      accessToken, accountId, store, model, options.onToken, options.signal, onReasoning, options.disableReasoning, options.reasoningEffort, cacheKey,
     );
 
     const loopOptions: AgenticLoopOptions = {
@@ -319,13 +359,18 @@ export class CodexResponsesAdapter implements CliAdapter {
       bashTimeoutMs: options.bashTimeoutMs,
       webTools: options.webTools,
       mcpTools: options.mcpTools,
+      // codex models are RLHF-trained on the V4A apply_patch format — expose it as
+      // the primary edit tool (edit_file stays as fallback). Verified: gpt-5.3-codex-spark
+      // emits clean V4A here, whereas non-codex adapters keep edit_file only.
+      applyPatch: true,
       signal: options.signal,
     };
 
     try {
       const result = await runAgenticLoop(loopOptions);
       if (options.onLog) {
-        options.onLog(`[Codex ${model}] ${result.apiCallCount} API calls, ${result.toolCallCount} tool uses, ${result.totalTokens} tokens`);
+        const pct = result.totalTokens > 0 ? Math.round((result.cachedTokens / result.totalTokens) * 100) : 0;
+        options.onLog(`[Codex ${model}] ${result.apiCallCount} API calls, ${result.toolCallCount} tool uses, ${result.totalTokens} tokens (${result.cachedTokens} cached, ${pct}%)`);
       }
       return loopResultToCliResult(result);
     } catch (err) {
@@ -348,6 +393,8 @@ export class CodexResponsesAdapter implements CliAdapter {
     signal?: AbortSignal,
     onReasoning?: (line: string) => void,
     disableReasoning?: boolean,
+    reasoningEffort?: 'low' | 'medium' | 'high',
+    cacheKey?: string,
   ) {
     let token = initialToken;
     let retried = false;
@@ -362,11 +409,14 @@ export class CodexResponsesAdapter implements CliAdapter {
       };
       if (instructions) body.instructions = instructions;
       if (tools.length > 0) body.tools = toolsToResponsesTools(tools);
+      // Route every turn of this run to the same prompt cache so the stable prefix
+      // (instructions + worker prompt) reuses cached tokens across tool turns.
+      if (cacheKey) body.prompt_cache_key = cacheKey;
       // Surface the model's thinking: request a reasoning summary so the live log
       // shows 💭 thoughts (codex-responses keeps thinking in the reasoning channel
       // and emits little output_text on tool-call turns). Worker (disableReasoning)
       // uses low effort to stay cheap; other roles use medium. effort ∈ low|medium|high.
-      body.reasoning = { effort: disableReasoning ? 'low' : 'medium', summary: 'auto' };
+      body.reasoning = { effort: resolveReasoningEffort(reasoningEffort, disableReasoning), summary: 'auto' };
       // NOTE: never set max_output_tokens — the Codex backend rejects it with HTTP 400.
 
       const doCall = async (accessToken: string): Promise<ChatLikeResponse> => {
