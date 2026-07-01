@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.0 — 2026-07-01
+
+### Added
+
+- **CLI agent runs now grow repo knowledge** — `openswarm run`, `openswarm fix`, and `openswarm review --max` record into the per-repo knowledge memory (previously only the autonomous daemon did). A standalone run makes the codebase memory grow and gets recalled into the next worker/reviewer prompt: `run` records the task outcome (success pattern / review-rejection pitfall), `fix` records what made the checks pass, and `review --max` records the verdict + top follow-ups as **one capped constraint** (≤10, so hundreds of findings can't flood the memory). Default on; `--no-learn` opts out per command for throwaway/exploratory runs. (INT-2268)
+
 ## 0.12.0 — 2026-07-01
 
 ### Added

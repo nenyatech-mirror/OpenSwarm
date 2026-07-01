@@ -512,8 +512,9 @@ the CLI (fire-and-forget with a short timeout, and failures are silently ignored
 Full version history lives in **[CHANGELOG.md](CHANGELOG.md)** and the
 [GitHub Releases](https://github.com/unohee/OpenSwarm/releases) page.
 
-Latest — **v0.12.0**: `openswarm fix` — run the CI/test checks, fan a fix-worker
-out over the failures, and re-run until green. See CHANGELOG.md for the rest.
+Latest — **v0.13.0**: CLI agent runs (`run` / `fix` / `review --max`) now grow the
+per-repo knowledge memory, not just the daemon (`--no-learn` opts out). See
+CHANGELOG.md for the rest.
 
 ---
 
