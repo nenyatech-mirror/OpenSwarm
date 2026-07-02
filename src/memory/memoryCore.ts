@@ -69,6 +69,30 @@ export function clamp01(value: unknown, fallback: number): number {
   return Math.max(0, Math.min(1, n));
 }
 
+export function safeParseMetadata(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function sqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function normalizedL2DistanceToSimilarity(distance: unknown): number {
+  const d = Number(distance);
+  if (!Number.isFinite(d)) return 0;
+  return Math.max(-1, Math.min(1, 1 - d / 2));
+}
+
 // PRD Memory Types (Cognitive Memory)
 export type CognitiveMemoryType = 'belief' | 'strategy' | 'user_model' | 'system_pattern' | 'constraint';
 
@@ -833,12 +857,30 @@ export async function searchMemorySafe(
       };
     }
 
-    const hasPostVectorFilters = Boolean(types?.length || repo || !includeExpired || minTrust > 0 || minFreshness > 0);
+    const now = Date.now();
+    const predicates: string[] = [];
+    if (types?.length) {
+      predicates.push(`type IN (${types.map(sqlString).join(', ')})`);
+    }
+    if (repo) {
+      predicates.push(`repo IN (${[repo, 'system', 'cognitive'].map(sqlString).join(', ')})`);
+    }
+    if (!includeExpired) {
+      predicates.push(`(expiresAt IS NULL OR expiresAt >= ${now} OR expiresAt >= ${PERMANENT_EXPIRY})`);
+    }
+    if (minTrust > 0) {
+      predicates.push(`(confidence >= ${minTrust} OR (confidence IS NULL AND trust >= ${minTrust}))`);
+    }
+
+    const hasPostVectorFilters = Boolean(minFreshness > 0 || minSimilarity > -1);
     const resultWindow = hasPostVectorFilters
       ? Math.min(Math.max(limit * 20, 100), 1000)
       : Math.max(limit * 5, limit);
-    const results = await table.vectorSearch(queryVector).limit(resultWindow).toArray();
-    const now = Date.now();
+    let vectorQuery = table.vectorSearch(queryVector);
+    if (predicates.length > 0) {
+      vectorQuery = vectorQuery.where(predicates.join(' AND '));
+    }
+    const results = await vectorQuery.limit(resultWindow).toArray();
 
     // Hybrid Retrieval with PRD scoring
     const scored = results
@@ -849,12 +891,12 @@ export async function searchMemorySafe(
         if (repo && r.repo !== repo && r.repo !== 'system' && r.repo !== 'cognitive') return false;
         const confidence = r.confidence ?? r.trust ?? 0;
         if (confidence < minTrust) return false;
-        const similarity = typeof r._distance === 'number' ? 1 - r._distance : 0;
+        const similarity = normalizedL2DistanceToSimilarity(r._distance);
         if (similarity < minSimilarity) return false;
         return true;
       })
       .map((r: any) => {
-        const similarity = typeof r._distance === 'number' ? 1 - r._distance : 0;
+        const similarity = normalizedL2DistanceToSimilarity(r._distance);
         const recency = calculateFreshness(r.createdAt);
         const importance = r.importance ?? calculateImportance(r.type);
         const accessCount = r.accessCount ?? 1;
@@ -874,7 +916,7 @@ export async function searchMemorySafe(
       repo: r.repo,
       title: r.title,
       content: r.content,
-      metadata: JSON.parse(r.metadata || '{}'),
+      metadata: safeParseMetadata(r.metadata),
       trust: r.trust ?? r.confidence ?? 0.7,
       createdAt: r.createdAt,
       score: hybridScore,

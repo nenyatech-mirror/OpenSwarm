@@ -166,7 +166,7 @@ export class LocalModelAdapter implements CliAdapter {
       model,
       callApi,
       maxTurns: options.maxTurns ?? 15,
-      timeoutMs: options.timeoutMs || 300000,
+      timeoutMs: options.timeoutMs ?? 300000,
       onLog: options.onLog,
       enableTools: (options.enableTools ?? true) && supportsTools,
       nudgeMaxOnNoEdit: options.nudgeMaxOnNoEdit,

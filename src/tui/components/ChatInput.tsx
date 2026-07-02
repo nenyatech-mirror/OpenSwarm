@@ -81,7 +81,7 @@ export function ChatInput({
           <Text color={theme.accent}>
             <Spinner type="dots" />
           </Text>
-          <Text>{' working… (Esc to leave)'}</Text>
+          <Text>{' working… (input paused)'}</Text>
         </Text>
       ) : (
         <Box>

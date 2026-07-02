@@ -29,6 +29,11 @@ const NOTIFICATION_TEXT_LIMIT = 4096;
 const NOTIFICATION_POST_TIMEOUT_MS = 10_000;
 const TRUNCATED_SUFFIX = '\n[truncated]';
 
+function sanitizeNotificationError(err: unknown): string {
+  const message = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  return message.replace(/https?:\/\/\S+/gi, '[redacted-url]');
+}
+
 function truncateNotificationText(text: string): string {
   if (text.length <= NOTIFICATION_TEXT_LIMIT) return text;
   return `${text.slice(0, NOTIFICATION_TEXT_LIMIT - TRUNCATED_SUFFIX.length)}${TRUNCATED_SUFFIX}`;
@@ -54,19 +59,21 @@ async function postJson(url: string, body: unknown): Promise<void> {
       reject(new Error(`notification webhook timed out after ${NOTIFICATION_POST_TIMEOUT_MS}ms`));
     }, NOTIFICATION_POST_TIMEOUT_MS);
   });
-  const res = await Promise.race([
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'OpenSwarm/0.7' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    }),
-    timeout,
-  ]).finally(() => {
+  try {
+    const res = await Promise.race([
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'OpenSwarm/0.7' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }),
+      timeout,
+    ]);
+    await Promise.race([res.body?.cancel() ?? Promise.resolve(), timeout]);
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  } finally {
     if (timeoutId) clearTimeout(timeoutId);
-  });
-  await res.arrayBuffer();
-  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  }
 }
 
 /** Logs only — used when no channel is configured. */
@@ -101,7 +108,7 @@ class SlackNotifier implements Notifier {
     try {
       await postJson(this.webhookUrl, { text: messageToText(message) });
     } catch (err) {
-      console.error('[Notify] Slack send failed:', err);
+      console.error('[Notify] Slack send failed:', sanitizeNotificationError(err));
     }
   }
 }
@@ -115,7 +122,7 @@ class TelegramNotifier implements Notifier {
         text: messageToText(message),
       });
     } catch (err) {
-      console.error('[Notify] Telegram send failed:', err);
+      console.error('[Notify] Telegram send failed:', sanitizeNotificationError(err));
     }
   }
 }
@@ -126,7 +133,7 @@ class WebhookNotifier implements Notifier {
     try {
       await postJson(this.url, { text: messageToText(message) });
     } catch (err) {
-      console.error('[Notify] Webhook send failed:', err);
+      console.error('[Notify] Webhook send failed:', sanitizeNotificationError(err));
     }
   }
 }

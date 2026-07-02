@@ -523,9 +523,8 @@ function isTrustedTaskStateSyncComment(comment: TaskStateSyncComment): boolean {
 
   if (comment.source === 'openswarm') return true;
 
-  // The Linear fetcher does not resolve comment authors yet (user: undefined) —
-  // when no author info exists at all, fall back to the marker/prefix checks
-  // above (status quo) instead of silently dropping every sync comment.
+  // Linear fetcher can omit author metadata; when the marker and prefix are
+  // present and no identity fields exist, preserve the historical sync path.
   if (comment.user === undefined && comment.author === undefined && comment.source === undefined) return true;
 
   const author = (comment.user || comment.author || '').trim().toLowerCase();

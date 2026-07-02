@@ -244,7 +244,9 @@ export async function runWorker(options: WorkerOptions): Promise<WorkerResult> {
 
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`[Worker] Execution failed (${adapterName}): ${errMsg}`);
-      if (error instanceof Error && error.message.includes('code')) {
+      // Match the exact base-adapter message — a bare 'code' substring also hit
+      // "codex timeout ..." and mislabeled timeouts as auth failures.
+      if (error instanceof Error && error.message.includes('CLI failed with code')) {
         console.error('[Worker] CLI exited with non-zero code — check adapter auth and permissions');
       }
 

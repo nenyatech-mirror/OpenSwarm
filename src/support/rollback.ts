@@ -76,8 +76,12 @@ function checkpointFilePath(checkpointId: string): string {
 }
 
 function parseCheckpoint(content: string): Checkpoint | null {
-  const parsed = CheckpointSchema.safeParse(JSON.parse(content));
-  return parsed.success ? parsed.data : null;
+  try {
+    const parsed = CheckpointSchema.safeParse(JSON.parse(content));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -437,7 +441,8 @@ export async function listCheckpoints(): Promise<Checkpoint[]> {
     for (const file of files) {
       if (file.endsWith('.json')) {
         const content = await fs.readFile(resolve(CHECKPOINT_DIR, file), 'utf-8');
-        checkpoints.push(JSON.parse(content));
+        const checkpoint = parseCheckpoint(content);
+        if (checkpoint) checkpoints.push(checkpoint);
       }
     }
 

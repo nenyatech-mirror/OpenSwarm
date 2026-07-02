@@ -257,7 +257,7 @@ ${promptDataBlock(workerReport)}
 
 \`\`\`json
 {
-  "decision": "approve" | "revise" | "reject",
+  "decision": "revise",
   "feedback": "전체적인 피드백 (1-3문장)",
   "issues": ["발견된 문제점 목록 (없으면 빈 배열)"],
   "suggestions": ["개선 제안 목록 (없으면 빈 배열)"],
@@ -314,7 +314,7 @@ ${promptDataBlock(workerReport)}
 
 \`\`\`json
 {
-  "decision": "approve" | "revise" | "reject",
+  "decision": "revise",
   "feedback": "전체적인 피드백 (1-3문장)",
   "issues": ["발견된 문제점 목록 (없으면 빈 배열)"],
   "suggestions": ["개선 제안 목록 (없으면 빈 배열)"],
@@ -476,8 +476,8 @@ ${draftSection}${kgSection}
 
 ## Important
 - 코드를 작성하지 마라, 분석만 하라
-- 프로젝트 구조를 깊게 탐색하지 마라 (파일 읽기 최소화)
-- 작업 설명(title + description)만으로 추정하라
+- sub-task description과 fileScope의 근거를 잡는 데 필요한 가벼운 read_file/search_files 증거만 사용하라. 프로젝트 구조를 깊게 탐색하지 마라
+- 작업 설명과 실제로 수집한 가벼운 증거를 바탕으로 추정하라
 - 불확실하면 보수적으로 (더 길게) 추정하라
 - JSON 결과를 즉시 출력하라 (추가 검증 불필요)
 `;

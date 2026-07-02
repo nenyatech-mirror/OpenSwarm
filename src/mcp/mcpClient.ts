@@ -35,6 +35,7 @@ const MCP_STDIO_ENV_ALLOWLIST = new Set([
   'PATHEXT',
 ]);
 const MAX_MCP_TOOL_RESULT_CHARS = 20_000;
+const EMPTY_INPUT_SCHEMA: Record<string, unknown> = { type: 'object', properties: {} };
 
 interface ServerConfig {
   transport: 'stdio' | 'http' | 'sse';
@@ -63,6 +64,66 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function stringArrayOrNull(value: unknown): string[] | null {
+  if (value === undefined) return [];
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : null;
+}
+
+function stringRecordOrNull(value: unknown): Record<string, string> | undefined | null {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) return null;
+  const out: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== 'string') return null;
+    out[key] = item;
+  }
+  return out;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function isJsonSchemaObject(schema: unknown, depth = 0): schema is Record<string, unknown> {
+  if (!isRecord(schema) || depth > 8) return false;
+  if (schema.type !== undefined) {
+    const type = schema.type;
+    if (!(typeof type === 'string' || isStringArray(type))) return false;
+  }
+  if (schema.properties !== undefined) {
+    if (!isRecord(schema.properties)) return false;
+    for (const value of Object.values(schema.properties)) {
+      if (!isJsonSchemaObject(value, depth + 1)) return false;
+    }
+  }
+  if (schema.required !== undefined && !isStringArray(schema.required)) return false;
+  if (schema.items !== undefined) {
+    const items = schema.items;
+    if (Array.isArray(items)) {
+      if (!items.every((item) => isJsonSchemaObject(item, depth + 1))) return false;
+    } else if (!isJsonSchemaObject(items, depth + 1)) {
+      return false;
+    }
+  }
+  if (schema.additionalProperties !== undefined) {
+    const additional = schema.additionalProperties;
+    if (typeof additional !== 'boolean' && !isJsonSchemaObject(additional, depth + 1)) return false;
+  }
+  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
+    const value = schema[keyword];
+    if (value !== undefined && (!Array.isArray(value) || !value.every((item) => isJsonSchemaObject(item, depth + 1)))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sanitizeInputSchema(schema: unknown): Record<string, unknown> {
+  if (!isJsonSchemaObject(schema)) return EMPTY_INPUT_SCHEMA;
+  if (schema.type !== undefined && schema.type !== 'object') return EMPTY_INPUT_SCHEMA;
+  return schema;
+}
+
 /** A persisted entry: `{preset}`, `{command,args,env}` (stdio) or `{url,headers,transport?}` (remote). */
 function normalizeEntry(raw: unknown): ServerConfig | null {
   if (!isRecord(raw)) return null;
@@ -70,16 +131,21 @@ function normalizeEntry(raw: unknown): ServerConfig | null {
     return BUILTIN_MCP_SERVERS[raw.preset] ?? null;
   }
   if (typeof raw.command === 'string' && raw.command) {
+    const args = stringArrayOrNull(raw.args);
+    const env = stringRecordOrNull(raw.env);
+    if (!args || env === null) return null;
     return {
       transport: 'stdio',
       command: raw.command,
-      args: Array.isArray(raw.args) ? (raw.args as string[]) : [],
-      env: (raw.env as Record<string, string>) ?? undefined,
+      args,
+      env,
     };
   }
   if (typeof raw.url === 'string' && raw.url) {
+    const headers = stringRecordOrNull(raw.headers);
+    if (headers === null) return null;
     const t = raw.transport === 'sse' ? 'sse' : 'http';
-    return { transport: t, url: raw.url, headers: (raw.headers as Record<string, string>) ?? undefined };
+    return { transport: t, url: raw.url, headers };
   }
   return null;
 }
@@ -87,12 +153,14 @@ function normalizeEntry(raw: unknown): ServerConfig | null {
 /** Read ~/.openswarm/mcp.json → { serverName: ServerConfig }. */
 export function loadRegistry(path = MCP_JSON_PATH): Record<string, ServerConfig> {
   if (!existsSync(path)) return {};
-  let parsed: { mcpServers?: Record<string, Record<string, unknown>> };
+  let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
     return {};
   }
+  if (!isRecord(parsed)) return {};
+  if (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers)) return {};
   const servers = parsed.mcpServers ?? {};
   const out: Record<string, ServerConfig> = {};
   for (const [name, raw] of Object.entries(servers)) {
@@ -208,7 +276,7 @@ export async function initMcpTools(registry = loadRegistry()): Promise<ToolDefin
           function: {
             name: qualified,
             description: (tool.description ?? '').slice(0, 1024),
-            parameters: tool.inputSchema ?? { type: 'object', properties: {} },
+            parameters: sanitizeInputSchema(tool.inputSchema),
           },
         });
       }

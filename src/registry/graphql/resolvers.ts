@@ -7,7 +7,7 @@
 import { getRegistryStore, type RegisterEntityInput, type UpdateEntityInput } from '../sqliteStore.js';
 import { onEntityDeprecated, onEntityWarningAdded } from '../memoryBridge.js';
 import type {
-  CodeEntity, CodeEntityFilter, EntityStatus, WarningSeverity, WarningCategory, RelationType,
+  CodeEntity, CodeEntityFilter, EntityStatus, EntityWarning, WarningSeverity, WarningCategory, RelationType,
 } from '../schema.js';
 
 const DEFAULT_ENTITY_LIMIT = 50;
@@ -50,9 +50,147 @@ function sanitizeSearch(search: string | undefined): string | undefined {
     .join(' AND ');
 }
 
-function pageList<T>(items: T[], limit: number | undefined, offset: number | undefined): T[] {
-  const start = clampOffset(offset);
-  return items.slice(start, start + clampLimit(limit, DEFAULT_ENTITY_LIMIT, MAX_ENTITY_LIMIT));
+type RegistryEntityRow = Record<string, unknown> & { id: string };
+
+interface RegistryWarningRow {
+  id: string;
+  entity_id: string;
+  severity: string;
+  category: string;
+  message: string;
+  resolved: number;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+interface RegistryDatabase {
+  prepare<T>(sql: string): {
+    all(...params: unknown[]): T[];
+  };
+}
+
+interface RegistryStoreInternals {
+  db: RegistryDatabase;
+  rowsToEntities(rows: RegistryEntityRow[]): CodeEntity[];
+  rowToWarning(row: RegistryWarningRow): EntityWarning;
+}
+
+function registryStoreInternals(): RegistryStoreInternals {
+  return getRegistryStore() as unknown as RegistryStoreInternals;
+}
+
+function entitiesByTagValue(
+  tag: string,
+  value: string,
+  projectId: string | undefined,
+  limit: number | undefined,
+  offset: number | undefined,
+): CodeEntity[] {
+  const store = registryStoreInternals();
+  const params: unknown[] = [tag, value];
+  const projectWhere = projectId ? 'AND e.project_id = ?' : '';
+  if (projectId) params.push(projectId);
+
+  const rows = store.db.prepare<RegistryEntityRow>(`
+    SELECT e.* FROM code_entities e
+    JOIN code_entity_tags t ON t.entity_id = e.id
+    WHERE t.tag = ? AND t.value = ? ${projectWhere}
+    ORDER BY e.file_path, e.line_start NULLS LAST, e.name
+    LIMIT ? OFFSET ?
+  `).all(
+    ...params,
+    clampLimit(limit, DEFAULT_ENTITY_LIMIT, MAX_ENTITY_LIMIT),
+    clampOffset(offset),
+  );
+  return store.rowsToEntities(rows);
+}
+
+function unresolvedWarnings(
+  severity: WarningSeverity | undefined,
+  projectId: string | undefined,
+  limit: number | undefined,
+  offset: number | undefined,
+): EntityWarning[] {
+  const store = registryStoreInternals();
+  const conditions = ['w.resolved = 0'];
+  const params: unknown[] = [];
+  if (severity) {
+    conditions.push('w.severity = ?');
+    params.push(severity);
+  }
+  if (projectId) {
+    conditions.push('e.project_id = ?');
+    params.push(projectId);
+  }
+
+  const rows = store.db.prepare<RegistryWarningRow>(`
+    SELECT w.* FROM code_entity_warnings w
+    JOIN code_entities e ON e.id = w.entity_id
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY
+      CASE w.severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1 WHEN 'warning' THEN 2 ELSE 3 END,
+      w.created_at DESC
+    LIMIT ? OFFSET ?
+  `).all(
+    ...params,
+    clampLimit(limit, DEFAULT_ENTITY_LIMIT, MAX_ENTITY_LIMIT),
+    clampOffset(offset),
+  );
+  return rows.map(row => store.rowToWarning(row));
+}
+
+function searchEntities(
+  query: string,
+  projectId: string | undefined,
+  limit: number,
+): CodeEntity[] {
+  const store = registryStoreInternals();
+  const projectWhere = projectId ? 'AND e.project_id = ?' : '';
+  const ftsParams: unknown[] = [query];
+  if (projectId) ftsParams.push(projectId);
+
+  let ftsRows: RegistryEntityRow[] = [];
+  try {
+    ftsRows = store.db.prepare<RegistryEntityRow>(`
+      SELECT e.* FROM code_entities e
+      INNER JOIN code_entities_fts ON code_entities_fts.rowid = e.rowid
+      WHERE code_entities_fts MATCH ? ${projectWhere}
+      LIMIT ?
+    `).all(...ftsParams, limit);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes('fts5') && !msg.includes('MATCH')) {
+      console.warn('[Registry] searchEntities FTS error:', msg);
+    }
+  }
+
+  const results = store.rowsToEntities(ftsRows);
+  if (results.length >= limit) return results;
+
+  const escapedQuery = query.replace(/[%_]/g, ch => `\\${ch}`);
+  const likePattern = `%${escapedQuery}%`;
+  const fallbackParams: unknown[] = [
+    likePattern, likePattern, likePattern, likePattern, likePattern,
+  ];
+  const fallbackConditions = [
+    `(name LIKE ? ESCAPE '\\' OR qualified_name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\' OR signature LIKE ? ESCAPE '\\')`,
+  ];
+  if (projectId) {
+    fallbackConditions.push('project_id = ?');
+    fallbackParams.push(projectId);
+  }
+  if (results.length > 0) {
+    fallbackConditions.push(`id NOT IN (${results.map(() => '?').join(',')})`);
+    fallbackParams.push(...results.map(entity => entity.id));
+  }
+
+  const fallbackRows = store.db.prepare<RegistryEntityRow>(`
+    SELECT * FROM code_entities
+    WHERE ${fallbackConditions.join(' AND ')}
+    LIMIT ?
+  `).all(...fallbackParams, limit - results.length);
+  results.push(...store.rowsToEntities(fallbackRows));
+  return results;
 }
 
 function normalizeEntityFilter(filter: CodeEntityFilter | undefined): CodeEntityFilter {
@@ -121,9 +259,9 @@ export const registryResolvers = {
     },
 
     entitiesByTag: (_: unknown, { tag, value, projectId, limit, offset }: {
-      tag: string; value?: string; projectId?: string; limit?: number; offset?: number;
+      tag: string; value?: string | null; projectId?: string; limit?: number; offset?: number;
     }) => {
-      if (value === undefined) {
+      if (value == null) {
         return getRegistryStore().listEntities({
           projectId,
           tags: [tag],
@@ -131,31 +269,20 @@ export const registryResolvers = {
           offset: clampOffset(offset),
         }).entities;
       }
-      const entities = getRegistryStore()
-        .entitiesByTag(tag, value)
-        .filter((entity) => !projectId || entity.projectId === projectId);
-      return pageList(entities, limit, offset);
+      return entitiesByTagValue(tag, value, projectId, limit, offset);
     },
 
     entityWarnings: (_: unknown, { severity, projectId, limit, offset }: {
       severity?: WarningSeverity; projectId?: string; limit?: number; offset?: number;
     }) => {
-      const store = getRegistryStore();
-      const warnings = store.getUnresolvedWarnings(severity)
-        .filter((warning) => !projectId || store.getEntity(warning.entityId)?.projectId === projectId);
-      return pageList(warnings, limit, offset);
+      return unresolvedWarnings(severity, projectId, limit, offset);
     },
 
     searchEntities: (_: unknown, { query, projectId, limit }: { query: string; projectId?: string; limit?: number }) => {
       const search = normalizeSearchText(query);
       if (!search) return [];
       const cappedLimit = clampLimit(limit, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT);
-      const searchLimit = projectId ? MAX_SEARCH_LIMIT : cappedLimit;
-      return getRegistryStore().searchEntities(
-        search,
-        searchLimit,
-      ).filter((entity) => !projectId || entity.projectId === projectId)
-        .slice(0, cappedLimit);
+      return searchEntities(search, projectId, cappedLimit);
     },
   },
 

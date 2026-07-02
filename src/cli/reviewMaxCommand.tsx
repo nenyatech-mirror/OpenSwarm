@@ -254,7 +254,9 @@ export async function runReviewMaxCommand(opts: ReviewMaxOptions = {}): Promise<
       const fixes = await runAreaFixes(
         run,
         cwd,
-        { concurrency, adapter: opts.adapter as AdapterName | undefined },
+        // 15 min per area: without an explicit timeoutMs the adapter default (5 min)
+        // SIGKILLed fix workers on issue-heavy areas mid-edit.
+        { concurrency, adapter: opts.adapter as AdapterName | undefined, timeoutMs: 900_000 },
         {
           onProgress: (e) => {
             if (e.type === 'done') console.log(`  ${status.ok(`${e.label} — ${e.filesChanged} file(s) changed`)}`);

@@ -7,6 +7,12 @@
 import { projectsToTable, pipelineToTable, stuckToTable, issuesToTable, type Table } from './monitorRows.js';
 
 const base = (port: number) => `http://127.0.0.1:${port}`;
+const MONITOR_FETCH_TIMEOUT_MS = 15_000;
+
+function timeoutSignal(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(MONITOR_FETCH_TIMEOUT_MS);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
 
 async function assertOk(res: Response, label: string): Promise<void> {
   if (res.ok) return;
@@ -22,30 +28,31 @@ async function assertOk(res: Response, label: string): Promise<void> {
   throw new Error(`${label} failed: HTTP ${res.status}: ${message}`);
 }
 
-export async function fetchProjects(port: number): Promise<Table> {
-  const res = await fetch(`${base(port)}/api/projects`);
+export async function fetchProjects(port: number, signal?: AbortSignal): Promise<Table> {
+  const res = await fetch(`${base(port)}/api/projects`, { signal: timeoutSignal(signal) });
   await assertOk(res, 'GET /api/projects');
   return projectsToTable(await res.json());
 }
 
-export async function fetchTasks(port: number): Promise<Table> {
-  const res = await fetch(`${base(port)}/api/pipeline`);
+export async function fetchTasks(port: number, signal?: AbortSignal): Promise<Table> {
+  const res = await fetch(`${base(port)}/api/pipeline`, { signal: timeoutSignal(signal) });
   await assertOk(res, 'GET /api/pipeline');
   const { stages } = (await res.json()) as { stages: unknown[] };
   return pipelineToTable((stages ?? []) as never);
 }
 
-export async function fetchStuck(port: number): Promise<Table> {
-  const res = await fetch(`${base(port)}/api/stuck-issues`);
+export async function fetchStuck(port: number, signal?: AbortSignal): Promise<Table> {
+  const res = await fetch(`${base(port)}/api/stuck-issues`, { signal: timeoutSignal(signal) });
   await assertOk(res, 'GET /api/stuck-issues');
   const { stuckIssues, failedIssues } = (await res.json()) as { stuckIssues: never[]; failedIssues: never[] };
   return stuckToTable(stuckIssues ?? [], failedIssues ?? []);
 }
 
-export async function fetchIssues(port: number): Promise<Table> {
+export async function fetchIssues(port: number, signal?: AbortSignal): Promise<Table> {
   const res = await fetch(`${base(port)}/graphql`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: timeoutSignal(signal),
     body: JSON.stringify({
       query: '{ issues(filter: { limit: 50 }) { issues { id title status priority } total } }',
     }),

@@ -625,12 +625,18 @@ export async function getMyIssues(
   };
 
   // Apply timeout
-  const result = await Promise.race([
-    fetchIssues(),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`getMyIssues timed out after ${timeoutMs}ms`)), timeoutMs)
-    ),
-  ]);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let result: LinearIssueInfo[];
+  try {
+    result = await Promise.race([
+      fetchIssues(),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(`getMyIssues timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 
   // Cache the result
   myIssuesCache.set(cacheKey, {
@@ -1144,6 +1150,7 @@ export async function createIssue(
   if (!issue) {
     throw new Error('Failed to create issue');
   }
+  const stateName = (await issue.state)?.name ?? 'Unknown';
 
   // Increment counter
   dailyIssueCount++;
@@ -1156,7 +1163,7 @@ export async function createIssue(
     identifier: issue.identifier,
     title: issue.title,
     description: issue.description ?? undefined,
-    state: 'Backlog',
+    state: stateName,
     priority: issue.priority,
     labels,
     comments: [],
@@ -1218,6 +1225,7 @@ export async function createSubIssue(
     if (!issue) {
       throw new Error('Failed to create sub-issue');
     }
+    const stateName = (await issue.state)?.name ?? 'Unknown';
 
     console.log(`[Linear] Created sub-issue: ${issue.identifier} under ${parentIssue.identifier}`);
 
@@ -1226,7 +1234,7 @@ export async function createSubIssue(
       identifier: issue.identifier,
       title: issue.title,
       description: issue.description ?? undefined,
-      state: 'Backlog',
+      state: stateName,
       priority: issue.priority,
       labels: options?.labels || [],
       comments: [],

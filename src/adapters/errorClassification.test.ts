@@ -12,6 +12,7 @@ describe('isInfraError (INT-2010)', () => {
     expect(isInfraError(new Error('spawn codex ENOENT'))).toBe(true);
     expect(isInfraError(new Error('Request failed: 401 Unauthorized'))).toBe(true);
     expect(isInfraError(new Error('connect ETIMEDOUT'))).toBe(true);
+    expect(isInfraError(new Error('codex timeout after 300000ms'))).toBe(true);
     expect(isInfraError(new Error('read ECONNRESET'))).toBe(true);
     expect(isInfraError('getaddrinfo ENOTFOUND api.openai.com')).toBe(true);
   });

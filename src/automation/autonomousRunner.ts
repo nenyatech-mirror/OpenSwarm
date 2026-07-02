@@ -733,6 +733,31 @@ export class AutonomousRunner {
     broadcastEvent({ type: 'log', data: { taskId: 'system', stage: 'heartbeat', line } });
   }
 
+  private lastSkipSummary = '';
+
+  /**
+   * Log unmapped/disabled project skips as one aggregate line per category,
+   * and stay silent while the summary is identical to the previous heartbeat.
+   */
+  private syslogSkipSummary(unmapped: Map<string, number>, disabled: Map<string, number>): void {
+    const fmt = (m: Map<string, number>) => [...m.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, n]) => `${name} (${n})`)
+      .join(', ');
+    const total = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
+    const lines: string[] = [];
+    if (unmapped.size > 0) {
+      lines.push(`  ⚠ Skipped ${total(unmapped)} issue(s) in ${unmapped.size} unmapped project(s): ${fmt(unmapped)} — run \`openswarm add\` to map`);
+    }
+    if (disabled.size > 0) {
+      lines.push(`  ⚠ Skipped ${total(disabled)} issue(s) in ${disabled.size} disabled project(s): ${fmt(disabled)}`);
+    }
+    const summary = lines.join('\n');
+    if (summary === this.lastSkipSummary) return;
+    this.lastSkipSummary = summary;
+    for (const line of lines) this.syslog(line);
+  }
+
   async heartbeat(): Promise<void> {
     if (this._heartbeatRunning) {
       console.log('[AutonomousRunner] Heartbeat already running, skipping');
@@ -901,6 +926,10 @@ export class AutonomousRunner {
         }
       }
 
+      // Aggregate skip reasons per project instead of logging one line per issue —
+      // dozens of unmapped issues used to flood the LIVE LOG every heartbeat.
+      const skippedUnmapped = new Map<string, number>();
+      const skippedDisabled = new Map<string, number>();
       tasksForEngine = executableTasks.filter(task => {
         const projName = task.linearProject?.name;
         const projId = task.linearProject?.id;
@@ -912,15 +941,17 @@ export class AutonomousRunner {
             ?? this.projectPathCache.get(projName.toLowerCase())
             ?? this.projectPathCache.get(projName.replace(/-/g, ' '))));
         if (!cachedPath) {
-          this.syslog(`  ⚠ No repo mapped to Linear project "${projName ?? projId}" — run \`openswarm add\` and pick it. Skipping ${task.issueIdentifier}`);
+          const key = projName ?? projId ?? 'unknown';
+          skippedUnmapped.set(key, (skippedUnmapped.get(key) ?? 0) + 1);
           return false;
         }
         const enabled = this.isProjectEnabled(cachedPath);
         if (!enabled) {
-          this.syslog(`  ⚠ Project "${projName}" (${cachedPath}) not enabled — skipping ${task.issueIdentifier}`);
+          skippedDisabled.set(projName ?? cachedPath, (skippedDisabled.get(projName ?? cachedPath) ?? 0) + 1);
         }
         return enabled;
       });
+      this.syslogSkipSummary(skippedUnmapped, skippedDisabled);
       if (tasksForEngine.length === 0) {
         this.syslog(`⚠ No enabled tasks (${executableTasks.length} executable, ${tasks.length - executableTasks.length} backlog)`);
         this.syslog(`  Path cache: [${[...this.projectPathCache.entries()].map(([k,v]) => `${k}→${v}`).join(', ')}]`);

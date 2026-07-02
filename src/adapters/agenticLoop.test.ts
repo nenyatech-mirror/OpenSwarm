@@ -6,7 +6,7 @@
 // behaviour: keep recent blocks intact, never leave orphan tool messages.
 // ============================================
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -190,6 +190,33 @@ describe('runAgenticLoop nudge budgets (INT-1925)', () => {
     // would have left the guard exhausted → no "No-edit guard" log.)
     expect(logs.some((l) => l.includes('Read-loop nudge'))).toBe(true);
     expect(logs.some((l) => l.includes('No-edit guard'))).toBe(true);
+  });
+});
+
+describe('runAgenticLoop timeout contract', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('treats timeoutMs=0 as no deadline, matching spawnCli', async () => {
+    let now = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now++);
+    let calls = 0;
+    const callApi = async () => {
+      calls++;
+      return finalResp('done');
+    };
+
+    const res = await runAgenticLoop({
+      prompt: 'x',
+      cwd: process.cwd(),
+      model: 'test',
+      callApi,
+      webTools: false,
+      timeoutMs: 0,
+      maxTurns: 1,
+    });
+
+    expect(calls).toBe(1);
+    expect(res.text).toBe('done');
   });
 });
 

@@ -5,8 +5,8 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, createHash } from 'node:crypto';
-import { exec } from 'node:child_process';
 import { AuthProfileStore, type AuthProfile } from './oauthStore.js';
+import { openBrowser } from './openBrowser.js';
 
 // Constants
 
@@ -37,23 +37,6 @@ function generateCodeChallenge(verifier: string): string {
 
 function generateState(): string {
   return randomBytes(32).toString('hex');
-}
-
-// Browser open (cross-platform)
-
-function openBrowser(url: string): void {
-  const platform = process.platform;
-  const cmd =
-    platform === 'darwin' ? 'open' :
-    platform === 'win32' ? 'start' :
-    'xdg-open';
-
-  exec(`${cmd} "${url}"`, (err) => {
-    if (err) {
-      console.error(`[Auth] 브라우저를 자동으로 열 수 없습니다. 직접 열어주세요:`);
-      console.error(url);
-    }
-  });
 }
 
 // OAuth flow result

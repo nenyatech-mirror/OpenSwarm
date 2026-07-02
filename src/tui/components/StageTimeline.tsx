@@ -15,7 +15,7 @@ export interface StageTimelineProps {
 }
 
 export function StageTimeline({ stages, max = 12 }: StageTimelineProps) {
-  const shown = stages.slice(-max);
+  const shown = max > 0 ? stages.slice(-max) : [];
   return (
     <Box flexDirection="column">
       <Text bold>Pipeline stages</Text>

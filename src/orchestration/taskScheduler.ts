@@ -200,8 +200,9 @@ export class TaskScheduler extends EventEmitter {
       return false;
     }
 
+    const normalizedProject = normalizeProjectPath(projectPath);
     for (const running of this.runningTasks.values()) {
-      if (running.projectPath === projectPath) {
+      if (normalizeProjectPath(running.projectPath) === normalizedProject) {
         return true;
       }
     }

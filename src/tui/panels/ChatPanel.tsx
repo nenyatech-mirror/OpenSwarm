@@ -72,6 +72,9 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
   const createdAtRef = useRef<string>(new Date().toISOString());
   const goalRef = useRef<string | undefined>(goalProp);
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  const modelSelectorRequestRef = useRef(0);
+  const resumedGoalRef = useRef(false);
   const persistenceErrorRef = useRef<string | null>(null);
   // When set, the next submitted line is routed here (a /plan confirm or edit)
   // instead of being treated as chat — the Ink analogue of blessed pendingInput.
@@ -85,9 +88,22 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
   const [selectorIndex, setSelectorIndex] = useState(0);
   const cwd = projectPath ?? process.cwd();
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      modelSelectorRequestRef.current += 1;
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    modelSelectorRequestRef.current += 1;
+  }, [provider]);
+
   // Persist the conversation on every change so it survives exit and can be
   // reopened with `openswarm resume`. System/UI lines are dropped by
-  // historyToMessages; the goal rides along so resume keeps pursuing it. (INT-2014)
+  // historyToMessages; an active goal rides along so resume can restart it. (INT-2014)
   useEffect(() => {
     if (state.history.length === 0) return;
     void saveSession({
@@ -102,19 +118,25 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
       goal: goalRef.current,
     })
       .then(() => {
+        if (!mountedRef.current) return;
         persistenceErrorRef.current = null;
       })
       .catch((e) => {
+        if (!mountedRef.current) return;
         const msg = e instanceof Error ? e.message : String(e);
         if (persistenceErrorRef.current === msg) return;
         persistenceErrorRef.current = msg;
         dispatch({ type: 'system', content: `✖ failed to save session: ${msg}` });
       });
-  }, [state.history, provider, model]);
+  }, [state.history, provider, model, goalActive]);
 
   const ask = useCallback(
     (prompt: string) =>
       new Promise<string>((resolve) => {
+        if (!mountedRef.current) {
+          resolve('no');
+          return;
+        }
         dispatch({ type: 'system', content: prompt });
         setPending({ resolve });
       }),
@@ -122,7 +144,10 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
   );
 
   const planIO: PlanIO = {
-    print: (line) => dispatch({ type: 'system', content: line }),
+    print: (line) => {
+      if (!mountedRef.current) return;
+      dispatch({ type: 'system', content: line });
+    },
     confirm: async (prompt) => normalizeConfirm(await ask(prompt)),
     promptText: (prompt) => ask(prompt),
   };
@@ -133,9 +158,10 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
       try {
         await runPlanCommand(goal, planIO, { projectPath: cwd, model });
       } catch (e) {
+        if (!mountedRef.current) return;
         dispatch({ type: 'system', content: `✖ plan failed: ${e instanceof Error ? e.message : String(e)}` });
       } finally {
-        setBusy(false);
+        if (mountedRef.current) setBusy(false);
       }
     },
     // planIO is rebuilt each render but only closes over stable dispatch/ask.
@@ -160,9 +186,11 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
           // buffer — that's the /goal token-spam (INT-2013). Drop them here; codex
           // surfaces reasoning separately via onLog ('💭 …'). (INT-2014)
           (t, isThinking) => {
+            if (!mountedRef.current) return;
             if (!isThinking) dispatch({ type: 'stream', chunk: t });
           },
           (line) => {
+            if (!mountedRef.current) return;
             if (isActivityNoise(line)) return;
             setActivity((a) => [...a, line].slice(-10));
           },
@@ -171,14 +199,17 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
           cwd, // run in the repo `openswarm chat` was launched from (INT-2005)
         );
       } catch (e) {
+        if (!mountedRef.current) return;
         const msg = e instanceof Error ? e.message : String(e);
         // An abort (from /goal clear) is intentional, not an error.
         if (!ac.signal.aborted) dispatch({ type: 'stream', chunk: `\n[error] ${msg}` });
       } finally {
-        dispatch({ type: 'commit' });
-        setActivity([]);
-        setBusy(false);
-        abortRef.current = null;
+        if (mountedRef.current) {
+          dispatch({ type: 'commit' });
+          setActivity([]);
+          setBusy(false);
+          if (abortRef.current === ac) abortRef.current = null;
+        }
       }
     },
     [provider, model, cwd],
@@ -199,29 +230,43 @@ export function ChatPanel({ active, provider: providerProp, model: modelProp, pr
           { pursue: (g) => streamChat(buildGoalPursuitPrompt(g), GOAL_PURSUIT_MAX_TURNS) },
         );
       } catch (e) {
+        if (!mountedRef.current) return;
         dispatch({ type: 'system', content: `✖ goal failed: ${e instanceof Error ? e.message : String(e)}` });
       } finally {
-        setBusy(false);
-        // Pursuit turn finished — unblock input. The goal itself stays set
-        // (goalRef) until /goal clear, so resume keeps pursuing it.
-        setGoalActive(false);
+        if (mountedRef.current) {
+          goalRef.current = undefined;
+          setBusy(false);
+          // Pursuit turn finished — unblock input and remove the completed goal
+          // from the persisted session.
+          setGoalActive(false);
+        }
       }
     },
     [cwd, model, provider, streamChat], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
+  useEffect(() => {
+    if (!goalProp || resumedGoalRef.current) return;
+    resumedGoalRef.current = true;
+    void runGoal(goalProp);
+  }, [goalProp, runGoal]);
+
   // Open the /model selector for the current provider (async catalog). (INT-1961)
   const openModelSelector = useCallback(async () => {
+    const requestId = ++modelSelectorRequestRef.current;
+    const requestedProvider = provider;
     dispatch({ type: 'system', content: `Fetching models for ${provider}…` });
     try {
-      const models = await listChatModels(provider);
+      const models = await listChatModels(requestedProvider);
+      if (!mountedRef.current || requestId !== modelSelectorRequestRef.current) return;
       if (!models.length) {
-        dispatch({ type: 'system', content: `No models listed for ${provider}. Use /model <name>.` });
+        dispatch({ type: 'system', content: `No models listed for ${requestedProvider}. Use /model <name>.` });
         return;
       }
       setSelectorIndex(Math.max(0, models.indexOf(model)));
-      setSelector({ kind: 'model', title: `Switch model (${provider}):`, items: models });
+      setSelector({ kind: 'model', title: `Switch model (${requestedProvider}):`, items: models });
     } catch (e) {
+      if (!mountedRef.current || requestId !== modelSelectorRequestRef.current) return;
       dispatch({ type: 'system', content: `✖ failed to list models: ${e instanceof Error ? e.message : String(e)}` });
     }
   }, [provider, model]);

@@ -9,7 +9,7 @@ export interface LiveLogProps {
 }
 
 export function LiveLog({ logs, max = 12 }: LiveLogProps) {
-  const shown = logs.slice(-max);
+  const shown = max > 0 ? logs.slice(-max) : [];
   return (
     <Box flexDirection="column">
       <Text bold>Live log</Text>

@@ -1,6 +1,7 @@
 // DataTable — minimal column-aligned table for the monitor tabs (S6).
 // Hand-rolled (no ink-table) to avoid peer-version risk on ink 7 / react 19.
 import { Box, Text } from 'ink';
+import { displayWidth } from '../../cli/reviewProgress.js';
 import type { Table } from '../monitorRows.js';
 
 export interface DataTableProps extends Table {
@@ -12,9 +13,10 @@ export function DataTable({ columns, rows, empty }: DataTableProps) {
     return <Text dimColor>{empty ?? '(no data)'}</Text>;
   }
   const widths = columns.map((c, i) =>
-    Math.max(c.length, ...rows.map((r) => (r[i] ?? '').length)),
+    Math.max(displayWidth(c), ...rows.map((r) => displayWidth(r[i] ?? ''))),
   );
-  const fmt = (cells: string[]) => cells.map((cell, i) => (cell ?? '').padEnd(widths[i])).join('  ');
+  const fmt = (cells: string[]) =>
+    cells.map((cell, i) => `${cell ?? ''}${' '.repeat(Math.max(0, widths[i] - displayWidth(cell ?? '')))}`).join('  ');
   return (
     <Box flexDirection="column">
       <Text bold>{fmt(columns)}</Text>

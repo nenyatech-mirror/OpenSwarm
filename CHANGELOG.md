@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.2 — 2026-07-02
+
+### Fixed
+
+- **Review fix workers no longer die at the 5-minute default** — `review --max --fix` now gives each area worker a 15-minute timeout, and timeout failures are classified as infrastructure errors instead of being mislabeled as auth/permission problems. Direct API adapters now preserve the shared `timeoutMs: 0` contract as "no deadline". (INT-2350)
+- **Heartbeat Live Log skip spam is collapsed** — unmapped/disabled Linear project skips are aggregated per project and repeated identical summaries stay silent across heartbeats. (INT-2350)
+- **OAuth browser launch is safer and shared** — Linear, GPT, and OpenRouter PKCE flows now use one `spawn`-based browser opener instead of shell-quoting URLs into per-provider `exec` helpers.
+- **Auth, MCP, memory, and registry APIs fail more cleanly** — auth profile files are shape-validated before use, unknown OAuth providers fail explicitly, MCP registry/tool schemas are sanitized, memory metadata parsing is tolerant, vector search pushes filters into LanceDB, and registry GraphQL list/search resolvers avoid broad in-memory filtering.
+- **Web/TUI runtime hardening** — mutating GraphQL and local filesystem reads now honor origin/token checks, the web server clears its git-status poller on stop, monitor fetches are abortable with timeouts, SSE reconnects reject invalid streams and cap partial buffers, and resumed chat goals/model selectors avoid stale async state updates.
+- **Task-state and multibyte input regressions restored** — Linear sync comments without author metadata still hydrate canonical state when the OpenSwarm marker/prefix match, and the TUI again deduplicates doubled multibyte keystroke events.
+
 ## 0.17.1 — 2026-07-02
 
 ### Fixed

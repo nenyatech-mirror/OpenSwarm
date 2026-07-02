@@ -298,6 +298,18 @@ const SOURCE_EXTENSIONS = new Set([
 
 const MAX_FILE_SIZE = 512 * 1024;
 
+function makeFilesystemIssue(operation: string, filePath: string, err: unknown): BsIssue {
+  const message = err instanceof Error ? err.message : String(err);
+  return {
+    severity: 'critical',
+    category: 'filesystem',
+    message: `${operation} 실패 — 스캔 결과가 불완전합니다: ${message}`,
+    filePath,
+    line: 0,
+    matchedText: message,
+  };
+}
+
 export async function scanRepository(
   projectPath: string,
   options?: { verbose?: boolean },
@@ -310,7 +322,11 @@ export async function scanRepository(
     let entries;
     try {
       entries = await readdir(dirPath, { withFileTypes: true });
-    } catch { return; }
+    } catch (err) {
+      allIssues.push(makeFilesystemIssue('readdir', relPath || '.', err));
+      if (verbose) console.log(`  [bs] readdir failed ${relPath || '.'}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
 
     for (const entry of entries) {
       const fullPath = join(dirPath, entry.name);
@@ -329,7 +345,11 @@ export async function scanRepository(
         try {
           const fileStat = await stat(fullPath);
           if (fileStat.size > MAX_FILE_SIZE) continue;
-        } catch { continue; }
+        } catch (err) {
+          allIssues.push(makeFilesystemIssue('stat', entryRelPath, err));
+          if (verbose) console.log(`  [bs] stat failed ${entryRelPath}: ${err instanceof Error ? err.message : String(err)}`);
+          continue;
+        }
 
         try {
           const content = await readFile(fullPath, 'utf-8');
@@ -340,7 +360,11 @@ export async function scanRepository(
           if (verbose && issues.length > 0) {
             console.log(`  [bs] ${entryRelPath}: ${issues.length} issues`);
           }
-        } catch { continue; }
+        } catch (err) {
+          allIssues.push(makeFilesystemIssue('readFile', entryRelPath, err));
+          if (verbose) console.log(`  [bs] readFile failed ${entryRelPath}: ${err instanceof Error ? err.message : String(err)}`);
+          continue;
+        }
       }
     }
   }

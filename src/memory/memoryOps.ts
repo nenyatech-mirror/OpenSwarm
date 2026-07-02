@@ -14,6 +14,7 @@ import {
   searchMemory,
   calculateStability,
   calculateFreshness,
+  safeParseMetadata,
   logWork,
   type MemoryType,
   type MemorySearchResult,
@@ -91,7 +92,7 @@ export async function reviseMemory(
       confidence: options?.newConfidence ?? Math.max(0.3, (existing.confidence ?? 0.7) - 0.1),
       stability: calculateStability(newRevisionCount, age),
       metadata: JSON.stringify({
-        ...JSON.parse(existing.metadata || '{}'),
+        ...safeParseMetadata(existing.metadata),
         lastRevision: {
           timestamp: now,
           reason: options?.reason || 'manual revision',
@@ -229,7 +230,7 @@ export async function reconcileContradiction(
     archiveMemory.decay = 0.9;
     archiveMemory.importance = 0.1;
     archiveMemory.metadata = JSON.stringify({
-      ...JSON.parse(archiveMemory.metadata || '{}'),
+      ...safeParseMetadata(archiveMemory.metadata),
       archived: {
         timestamp: Date.now(),
         reason,
@@ -429,7 +430,7 @@ export async function applyMemoryDecay(daysSinceLastRun: number = 7): Promise<{
         // Archive if decay exceeds threshold
         if (r.decay >= ARCHIVE_THRESHOLD) {
           r.metadata = JSON.stringify({
-            ...JSON.parse(r.metadata || '{}'),
+            ...safeParseMetadata(r.metadata),
             archived: {
               timestamp: now,
               reason: 'decay_threshold_exceeded',
@@ -721,10 +722,8 @@ export async function getRecentConversations(
         if (r.derivedFrom === channelId) return true;
 
         // metadata.issueRef fallback
-        try {
-          const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata;
-          if (meta?.issueRef === channelId) return true;
-        } catch { /* ignore */ }
+        const meta = safeParseMetadata(r.metadata);
+        if (meta.issueRef === channelId) return true;
 
         return false;
       })
@@ -738,7 +737,7 @@ export async function getRecentConversations(
       repo: r.repo,
       title: r.title,
       content: r.content,
-      metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata || '{}') : r.metadata,
+      metadata: safeParseMetadata(r.metadata),
       trust: r.trust,
       createdAt: r.createdAt,
       score: 1.0,  // Score is meaningless for chronological lookup

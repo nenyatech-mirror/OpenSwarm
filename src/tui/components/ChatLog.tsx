@@ -63,7 +63,7 @@ export interface ChatLogProps {
 
 export function ChatLog({ history, streaming, activity = [], busy, maxMessages = 40 }: ChatLogProps) {
   const live = streaming !== null || busy;
-  const shown = history.slice(-maxMessages);
+  const shown = maxMessages > 0 ? history.slice(-maxMessages) : [];
   return (
     <Box flexDirection="column">
       {shown.map((line, i) => (

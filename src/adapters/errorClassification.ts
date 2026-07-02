@@ -26,6 +26,7 @@ const INFRA_ERROR_PATTERNS = [
   'spawn ', // spawn EACCES / spawn failures
   'etimedout',
   'timed out',
+  'timeout after',
   'esockettimedout',
   'econnreset',
   'econnrefused',

@@ -21,8 +21,10 @@ export function useTerminalSize(): TerminalSize {
   });
 
   useEffect(() => {
+    const readSize = () => ({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
+    setSize(readSize());
     if (!stdout) return;
-    const onResize = () => setSize({ columns: stdout.columns ?? 80, rows: stdout.rows ?? 24 });
+    const onResize = () => setSize(readSize());
     stdout.on('resize', onResize);
     return () => {
       stdout.off('resize', onResize);

@@ -53,6 +53,17 @@ export const DEFAULT_TIME_WINDOW: TimeWindowConfig = {
   timezone: 'Asia/Seoul',
 };
 
+const DEFAULT_TIMEZONE = DEFAULT_TIME_WINDOW.timezone ?? 'Asia/Seoul';
+const WEEKDAY_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
+
 /**
  * Convert time string to minutes
  * "09:30" -> 570
@@ -77,20 +88,32 @@ function isInTimeRange(currentMinutes: number, range: TimeRange): boolean {
   return currentMinutes >= start && currentMinutes <= end;
 }
 
-/**
- * Get current KST time
- */
-function _getKSTTime(): Date {
-  const now = new Date();
-  // Convert UTC to KST (UTC+9)
-  const kstOffset = 9 * 60; // in minutes
-  const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const kstMinutes = (utcMinutes + kstOffset) % (24 * 60);
+function getCurrentTimeParts(timezone: string | undefined): {
+  day: number;
+  minutes: number;
+  time: string;
+  timezone: string;
+} {
+  const resolvedTimezone = timezone || DEFAULT_TIMEZONE;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: resolvedTimezone,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date());
 
-  const kstDate = new Date(now);
-  kstDate.setUTCHours(Math.floor(kstMinutes / 60), kstMinutes % 60, 0, 0);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const hours = Number(values.hour);
+  const minutes = Number(values.minute);
+  const day = WEEKDAY_INDEX[values.weekday];
 
-  return kstDate;
+  return {
+    day,
+    minutes: hours * 60 + minutes,
+    time: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`,
+    timezone: resolvedTimezone,
+  };
 }
 
 /**
@@ -107,24 +130,18 @@ export function isWorkAllowed(config: TimeWindowConfig = DEFAULT_TIME_WINDOW): {
     return {
       allowed: true,
       reason: t('timeWindow.disabled'),
-      currentTime: formatCurrentTime(),
+      currentTime: formatCurrentTime(config.timezone),
     };
   }
 
-  const now = new Date();
-  const kstOffset = 9 * 60;
-  const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const kstMinutes = (utcMinutes + kstOffset) % (24 * 60);
-
-  // Calculate day of week (KST-based)
-  // Calculate day of week (KST-based)
-  const kstDay = (now.getUTCDay() + (utcMinutes + kstOffset >= 24 * 60 ? 1 : 0)) % 7;
-
-  const currentTimeStr = `${String(Math.floor(kstMinutes / 60)).padStart(2, '0')}:${String(kstMinutes % 60).padStart(2, '0')}`;
+  const current = getCurrentTimeParts(config.timezone);
+  const currentMinutes = current.minutes;
+  const currentDay = current.day;
+  const currentTimeStr = current.time;
 
   // Check day-of-week restrictions
   if (config.restrictedDays && config.restrictedDays.length > 0) {
-    if (!config.restrictedDays.includes(kstDay)) {
+    if (!config.restrictedDays.includes(currentDay)) {
       return {
         allowed: true,
         reason: t('timeWindow.weekendOrUnrestricted'),
@@ -135,19 +152,19 @@ export function isWorkAllowed(config: TimeWindowConfig = DEFAULT_TIME_WINDOW): {
 
   // Check blocked time ranges (highest priority)
   for (const blocked of config.blockedWindows) {
-    if (isInTimeRange(kstMinutes, blocked)) {
+    if (isInTimeRange(currentMinutes, blocked)) {
       return {
         allowed: false,
         reason: t('timeWindow.blockedWindow', { start: blocked.start, end: blocked.end }),
         currentTime: currentTimeStr,
-        nextAllowedTime: findNextAllowedWindow(kstMinutes, config.allowedWindows),
+        nextAllowedTime: findNextAllowedWindow(currentMinutes, config.allowedWindows),
       };
     }
   }
 
   // Check allowed time ranges
   for (const allowed of config.allowedWindows) {
-    if (isInTimeRange(kstMinutes, allowed)) {
+    if (isInTimeRange(currentMinutes, allowed)) {
       return {
         allowed: true,
         reason: t('timeWindow.allowedWindow', { start: allowed.start, end: allowed.end }),
@@ -157,7 +174,7 @@ export function isWorkAllowed(config: TimeWindowConfig = DEFAULT_TIME_WINDOW): {
   }
 
   // Not in any allowed time range
-  const nextWindow = findNextAllowedWindow(kstMinutes, config.allowedWindows);
+  const nextWindow = findNextAllowedWindow(currentMinutes, config.allowedWindows);
   return {
     allowed: false,
     reason: t('timeWindow.outsideAllowed'),
@@ -200,13 +217,10 @@ function findNextAllowedWindow(currentMinutes: number, windows: TimeRange[]): st
 /**
  * Format current time
  */
-function formatCurrentTime(): string {
-  const now = new Date();
-  const kstOffset = 9 * 60;
-  const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const kstMinutes = (utcMinutes + kstOffset) % (24 * 60);
-
-  return `${String(Math.floor(kstMinutes / 60)).padStart(2, '0')}:${String(kstMinutes % 60).padStart(2, '0')} KST`;
+function formatCurrentTime(timezone: string | undefined): string {
+  const current = getCurrentTimeParts(timezone);
+  const label = current.timezone === 'Asia/Seoul' ? 'KST' : current.timezone;
+  return `${current.time} ${label}`;
 }
 
 /**
@@ -218,15 +232,10 @@ export function getMarketStatus(config: TimeWindowConfig = DEFAULT_TIME_WINDOW):
   canWork: boolean;
 } {
   const result = isWorkAllowed(config);
-  const time = result.currentTime;
-  const [hours, minutes] = time.split(':').map(Number);
-  const totalMinutes = hours * 60 + minutes;
-  const now = new Date();
-  const kstOffset = 9 * 60;
-  const utcMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
-  const kstDay = (now.getUTCDay() + (utcMinutes + kstOffset >= 24 * 60 ? 1 : 0)) % 7;
+  const current = getCurrentTimeParts(config.timezone);
+  const totalMinutes = current.minutes;
 
-  if (config.restrictedDays && config.restrictedDays.length > 0 && !config.restrictedDays.includes(kstDay)) {
+  if (config.restrictedDays && config.restrictedDays.length > 0 && !config.restrictedDays.includes(current.day)) {
     return {
       status: 'closed',
       description: t('timeWindow.marketStatus.closed'),

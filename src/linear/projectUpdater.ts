@@ -8,6 +8,7 @@ import { getPipelineHistory, getAllRejectionEntries, type PipelineHistoryEntry, 
 import { getGraph, toProjectSlug, getProjectHealth, type ModuleHealth } from '../knowledge/index.js';
 import type { ProjectSummary } from '../knowledge/index.js';
 import { getDateLocale } from '../locale/index.js';
+import { withRateLimit } from '../support/rateLimiter.js';
 
 // Debounce: prevent duplicate calls within 60 seconds per project
 const lastUpdateTime = new Map<string, number>();
@@ -380,6 +381,63 @@ export async function postStatusUpdate(
 // B-2. Project Overview refresh
 
 const AUTOMATION_SECTION_MARKER = '## Automation Status';
+const PROJECT_OVERVIEW_PAGE_SIZE = 100;
+const PROJECT_OVERVIEW_MAX_PAGES = 10;
+
+interface ProjectOverviewIssueNode {
+  priority: number;
+  state?: { name?: string | null } | null;
+}
+
+const PROJECT_OVERVIEW_ISSUES_QUERY = `
+  query OswProjectOverviewIssues($projectId: String!, $first: Int, $after: String) {
+    project(id: $projectId) {
+      issues(first: $first, after: $after) {
+        nodes {
+          priority
+          state { name }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }`;
+
+async function fetchProjectOverviewIssues(
+  linear: LinearClient,
+  projectId: string,
+): Promise<ProjectOverviewIssueNode[]> {
+  const gql = (linear as unknown as {
+    client: { rawRequest: <T>(q: string, v?: Record<string, unknown>) => Promise<{ data: T }> };
+  }).client;
+  const issueNodes: ProjectOverviewIssueNode[] = [];
+  let after: string | undefined;
+
+  for (let page = 0; page < PROJECT_OVERVIEW_MAX_PAGES; page++) {
+    const res = await withRateLimit('linear', () =>
+      gql.rawRequest<{
+        project?: {
+          issues?: {
+            nodes: ProjectOverviewIssueNode[];
+            pageInfo: { hasNextPage: boolean; endCursor?: string | null };
+          };
+        } | null;
+      }>(PROJECT_OVERVIEW_ISSUES_QUERY, {
+        projectId,
+        first: PROJECT_OVERVIEW_PAGE_SIZE,
+        after,
+      }),
+    );
+    const issues = res.data.project?.issues;
+    if (!issues) break;
+
+    issueNodes.push(...issues.nodes);
+    if (!issues.pageInfo.hasNextPage) break;
+    after = issues.pageInfo.endCursor ?? undefined;
+    if (!after) break;
+  }
+
+  return issueNodes;
+}
 
 async function refreshProjectOverview(projectId: string, projectPath?: string): Promise<void> {
   const linear = getClient();
@@ -388,21 +446,13 @@ async function refreshProjectOverview(projectId: string, projectPath?: string): 
     const project = await linear.project(projectId);
     if (!project) return;
 
-    // Issue stats: count issues by state and priority
-    const issueNodes: Array<Awaited<ReturnType<typeof project.issues>>['nodes'][number]> = [];
-    let after: string | undefined;
-    while (true) {
-      const issues = await project.issues({ first: 250, after });
-      issueNodes.push(...issues.nodes);
-      if (!issues.pageInfo.hasNextPage) break;
-      after = issues.pageInfo.endCursor ?? undefined;
-      if (!after) break;
-    }
+    // Issue stats: one paged GraphQL query embeds state names and avoids per-issue lazy resolver calls.
+    const issueNodes = await fetchProjectOverviewIssues(linear, projectId);
     const stateCounts = new Map<string, number>();
     const priorityCounts = new Map<number, number>();
 
     for (const issue of issueNodes) {
-      const state = (await issue.state)?.name ?? 'Unknown';
+      const state = issue.state?.name ?? 'Unknown';
       stateCounts.set(state, (stateCounts.get(state) ?? 0) + 1);
       priorityCounts.set(issue.priority, (priorityCounts.get(issue.priority) ?? 0) + 1);
     }

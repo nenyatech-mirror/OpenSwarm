@@ -155,7 +155,7 @@ export class SqliteRegistryStore {
   private db: Database.Database;
 
   constructor(dbPath?: string) {
-    const path = dbPath ?? DEFAULT_DB_PATH;
+    const path = resolve(dbPath ?? DEFAULT_DB_PATH);
     mkdirSync(resolve(path, '..'), { recursive: true });
     this.db = new Database(path);
 
@@ -814,16 +814,19 @@ export class SqliteRegistryStore {
     return this.rowsToEntities(rows);
   }
 
-  searchEntities(query: string, limit = 20): CodeEntity[] {
+  searchEntities(query: string, limit = 20, projectId?: string): CodeEntity[] {
     // FTS5 검색 시도
     let ftsRows: EntityRow[] = [];
     try {
+      const projectFilter = projectId ? 'AND e.project_id = ?' : '';
+      const params = projectId ? [query, projectId, limit] : [query, limit];
       ftsRows = this.db.prepare(`
         SELECT e.* FROM code_entities e
         INNER JOIN code_entities_fts ON code_entities_fts.rowid = e.rowid
         WHERE code_entities_fts MATCH ?
+        ${projectFilter}
         LIMIT ?
-      `).all(query, limit) as EntityRow[];
+      `).all(...params) as EntityRow[];
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!msg.includes('fts5') && !msg.includes('MATCH')) {
@@ -838,11 +841,16 @@ export class SqliteRegistryStore {
       const escapedQuery = query.replace(/[%_]/g, ch => `\\${ch}`);
       const likePattern = `%${escapedQuery}%`;
       const existingIds = new Set(results.map(e => e.id));
+      const projectFilter = projectId ? 'AND project_id = ?' : '';
+      const params = projectId
+        ? [likePattern, likePattern, likePattern, likePattern, likePattern, projectId, limit]
+        : [likePattern, likePattern, likePattern, likePattern, likePattern, limit];
       const fallbackRows = this.db.prepare(`
         SELECT * FROM code_entities
         WHERE (name LIKE ? ESCAPE '\\' OR qualified_name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\' OR signature LIKE ? ESCAPE '\\')
+        ${projectFilter}
         LIMIT ?
-      `).all(likePattern, likePattern, likePattern, likePattern, likePattern, limit) as EntityRow[];
+      `).all(...params) as EntityRow[];
       const fallback = this.rowsToEntities(fallbackRows)
         .filter(e => !existingIds.has(e.id));
 
@@ -1040,10 +1048,15 @@ export class SqliteRegistryStore {
 
 // 싱글톤
 let storeInstance: SqliteRegistryStore | null = null;
+let storeInstancePath: string | null = null;
 
 export function getRegistryStore(dbPath?: string): SqliteRegistryStore {
+  const requestedPath = resolve(dbPath ?? DEFAULT_DB_PATH);
   if (!storeInstance) {
-    storeInstance = new SqliteRegistryStore(dbPath);
+    storeInstance = new SqliteRegistryStore(requestedPath);
+    storeInstancePath = requestedPath;
+  } else if (storeInstancePath !== requestedPath) {
+    throw new Error(`Registry store already opened for ${storeInstancePath}; close it before opening ${requestedPath}`);
   }
   return storeInstance;
 }
@@ -1052,5 +1065,6 @@ export function closeRegistryStore(): void {
   if (storeInstance) {
     storeInstance.close();
     storeInstance = null;
+    storeInstancePath = null;
   }
 }

@@ -34,6 +34,7 @@ import type { SubTask } from './planner.js';
 
 let server: ReturnType<typeof createServer> | null = null;
 let runnerRef: AutonomousRunner | undefined;
+let gitStatusPoller: NodeJS.Timeout | null = null;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 
 class HttpError extends Error {
@@ -82,6 +83,10 @@ function isLoopbackAddress(address: string | undefined): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+}
+
 function extractBearerToken(header: string | undefined): string | null {
   if (!header) return null;
   // Linear-time parse (no regex): 'Bearer' + one space/tab + token. A
@@ -91,9 +96,7 @@ function extractBearerToken(header: string | undefined): string | null {
   return header.slice(7).trim() || null;
 }
 
-function isAuthorizedMutation(req: IncomingMessage): boolean {
-  if (isLoopbackAddress(req.socket.remoteAddress)) return true;
-
+function hasValidWebToken(req: IncomingMessage): boolean {
   const configuredToken = process.env.OPENSWARM_WEB_TOKEN?.trim();
   if (!configuredToken) return false;
 
@@ -105,8 +108,62 @@ function isAuthorizedMutation(req: IncomingMessage): boolean {
   return presentedToken === configuredToken;
 }
 
+function getEffectivePort(url: URL): string {
+  if (url.port) return url.port;
+  return url.protocol === 'https:' ? '443' : '80';
+}
+
+function isTrustedLocalOrigin(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+
+  if (!isAllowedOrigin(origin)) return false;
+
+  let originUrl: URL;
+  try {
+    originUrl = new URL(origin);
+  } catch {
+    return false;
+  }
+
+  if (originUrl.hostname === 'tauri.localhost') return true;
+
+  const host = req.headers.host;
+  if (!host) return false;
+
+  let hostUrl: URL;
+  try {
+    hostUrl = new URL(`${originUrl.protocol}//${host}`);
+  } catch {
+    return false;
+  }
+
+  const sameHost = originUrl.hostname === hostUrl.hostname;
+  const loopbackAlias = isLoopbackHostname(originUrl.hostname) && isLoopbackHostname(hostUrl.hostname);
+  return (sameHost || loopbackAlias) && getEffectivePort(originUrl) === getEffectivePort(hostUrl);
+}
+
+function isAuthorizedMutation(req: IncomingMessage): boolean {
+  if (hasValidWebToken(req)) return true;
+  return isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req);
+}
+
+function isAuthorizedLocalRead(req: IncomingMessage): boolean {
+  if (hasValidWebToken(req)) return true;
+  return isLoopbackAddress(req.socket.remoteAddress) && isTrustedLocalOrigin(req);
+}
+
 function isMutatingApiRequest(pathname: string, method: string | undefined): boolean {
   return pathname.startsWith('/api/') && ['DELETE', 'PATCH', 'POST', 'PUT'].includes(method ?? '');
+}
+
+function isMutatingGraphQLRequest(requestUrl: URL, method: string | undefined): boolean {
+  if (!isGraphQLRequest(requestUrl.pathname)) return false;
+  if (['DELETE', 'PATCH', 'POST', 'PUT'].includes(method ?? '')) return true;
+  if (method !== 'GET') return false;
+
+  const query = requestUrl.searchParams.get('query') ?? '';
+  return query.includes('mutation');
 }
 
 function writeJson(res: ServerResponse, statusCode: number, body: unknown): void {
@@ -387,7 +444,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
         res.end();
         return;
       }
-      if (isMutatingApiRequest(url, req.method) && !isAuthorizedMutation(req)) {
+      if ((isMutatingApiRequest(url, req.method) || isMutatingGraphQLRequest(requestUrl, req.method)) && !isAuthorizedMutation(req)) {
         writeJson(res, 403, { error: 'Forbidden' });
         return;
       }
@@ -1114,6 +1171,11 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       // GET /api/fs/list?path=<absolute or ~/...>
       // Returns: { path, parent, entries: [{name, isDir}] } — dotfiles excluded, dirs first.
       } else if (url.startsWith('/api/fs/list') && req.method === 'GET') {
+        if (!isAuthorizedLocalRead(req)) {
+          writeJson(res, 403, { error: 'Forbidden' });
+          return;
+        }
+
         try {
           const requested = requestUrl.searchParams.get('path')?.trim();
           const startPath = requested && requested.length > 0
@@ -1316,7 +1378,7 @@ export async function startWebServer(port: number = 3847): Promise<void> {
       console.log(`Web interface running at:`);
       console.log(`  - http://127.0.0.1:${port} (localhost)`);
       console.log(`  - http://${tailscaleIP}:${port} (Tailscale)`);
-      startGitStatusPoller(() => Array.from(pinnedProjects));
+      gitStatusPoller = startGitStatusPoller(() => Array.from(pinnedProjects));
       startHealthChecker(30000);
       resolve();
     });
@@ -1327,6 +1389,11 @@ export async function startWebServer(port: number = 3847): Promise<void> {
  * Stop the web server
  */
 export async function stopWebServer(): Promise<void> {
+  if (gitStatusPoller) {
+    clearInterval(gitStatusPoller);
+    gitStatusPoller = null;
+  }
+
   if (server) {
     server.close();
     server = null;

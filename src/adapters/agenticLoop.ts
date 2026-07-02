@@ -195,7 +195,7 @@ export async function runAgenticLoop(options: AgenticLoopOptions): Promise<Agent
   } = options;
 
   const startTime = Date.now();
-  const deadline = startTime + timeoutMs;
+  const deadline = timeoutMs > 0 ? startTime + timeoutMs : Number.POSITIVE_INFINITY;
 
   // 메시지 히스토리 구성
   const messages: ChatMessage[] = [];

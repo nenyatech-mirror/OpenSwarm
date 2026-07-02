@@ -34,6 +34,31 @@ interface AuthProfileFile {
   profiles: Record<string, AuthProfile>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isAuthProfile(value: unknown): value is AuthProfile {
+  if (!isRecord(value)) return false;
+  if (value.type !== 'oauth' && value.type !== 'apiKey') return false;
+  return (
+    typeof value.provider === 'string' &&
+    typeof value.access === 'string' &&
+    typeof value.refresh === 'string' &&
+    typeof value.expires === 'number' &&
+    Number.isFinite(value.expires) &&
+    typeof value.clientId === 'string' &&
+    (value.accountId === undefined || typeof value.accountId === 'string')
+  );
+}
+
+function isAuthProfileFile(value: unknown): value is AuthProfileFile {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.profiles)) {
+    return false;
+  }
+  return Object.values(value.profiles).every(isAuthProfile);
+}
+
 // Constants
 
 const STORE_DIR = join(homedir(), '.openswarm');
@@ -63,7 +88,8 @@ export class AuthProfileStore {
     }
     try {
       const raw = readFileSync(STORE_PATH, 'utf-8');
-      return JSON.parse(raw) as AuthProfileFile;
+      const parsed: unknown = JSON.parse(raw);
+      return isAuthProfileFile(parsed) ? parsed : { version: 1, profiles: {} };
     } catch {
       return { version: 1, profiles: {} };
     }
@@ -129,7 +155,11 @@ export async function ensureValidToken(store: AuthProfileStore, profileKey: stri
     client_id: profile.clientId,
   });
 
-  const endpoint = TOKEN_ENDPOINTS[profile.provider] ?? OPENAI_TOKEN_ENDPOINT;
+  const endpoint = TOKEN_ENDPOINTS[profile.provider];
+  if (!endpoint) {
+    throw new Error(`Unknown OAuth provider "${profile.provider}" for auth profile "${profileKey}". Re-run auth login for this provider.`);
+  }
+
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },

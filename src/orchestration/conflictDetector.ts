@@ -75,6 +75,8 @@ function normalizeScope(entries: string[] | undefined): Set<string> {
   return out;
 }
 
+const UNKNOWN_SCOPE = 'unknown-file-scope';
+
 /**
  * Detect file-scope overlap between tasks. Each task's scope prefers the
  * planner-declared `fileScope` (authoritative), falling back to Knowledge Graph
@@ -92,6 +94,7 @@ export async function detectFileConflicts(
 
   // Step 1: 각 태스크의 영향 모듈 집합 수집
   const taskImpacts: Map<number, Set<string>> = new Map();
+  const unknownScopeIndices = new Set<number>();
 
   await Promise.all(
     tasks.map(async (task, idx) => {
@@ -105,11 +108,19 @@ export async function detectFileConflicts(
       }
 
       // Fall back to Knowledge Graph inference when no explicit scope exists.
-      const impact = await analyzeIssue(projectPath, task.title, task.description);
-      if (impact) {
-        const modules = normalizeScope([...impact.directModules, ...impact.dependentModules]);
-        if (modules.size > 0) taskImpacts.set(idx, modules);
+      try {
+        const impact = await analyzeIssue(projectPath, task.title, task.description);
+        if (impact) {
+          const modules = normalizeScope([...impact.directModules, ...impact.dependentModules]);
+          if (modules.size > 0) {
+            taskImpacts.set(idx, modules);
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn(`[ConflictDetector] Impact analysis failed for ${task.id}:`, err);
       }
+      unknownScopeIndices.add(idx);
     })
   );
 
@@ -120,10 +131,20 @@ export async function detectFileConflicts(
 
   for (let i = 0; i < tasks.length; i++) {
     const modulesI = taskImpacts.get(i);
-    if (!modulesI || modulesI.size === 0) continue;
 
     for (let j = i + 1; j < tasks.length; j++) {
       const modulesJ = taskImpacts.get(j);
+      if (unknownScopeIndices.has(i) || unknownScopeIndices.has(j)) {
+        const key = `${i}:${j}`;
+        if (!pairShared.has(key)) {
+          pairShared.set(key, new Set());
+        }
+        pairShared.get(key)!.add(UNKNOWN_SCOPE);
+        uf.union(i, j);
+        continue;
+      }
+
+      if (!modulesI || modulesI.size === 0) continue;
       if (!modulesJ || modulesJ.size === 0) continue;
 
       // 교집합 계산
@@ -162,11 +183,8 @@ export async function detectFileConflicts(
   const conflictGroups: ConflictGroup[] = [];
 
   for (const [, indices] of groups) {
-    // 영향 분석이 없는 태스크(그래프 미존재)는 단독 그룹으로 safe
-    const hasImpact = indices.some(i => taskImpacts.has(i));
-
-    if (indices.length === 1 || !hasImpact) {
-      // 단일 태스크 또는 영향 분석 없음 → safe
+    if (indices.length === 1) {
+      // 단일 태스크 → safe
       for (const idx of indices) {
         safe.push(tasks[idx]);
       }

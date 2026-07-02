@@ -258,7 +258,7 @@ After the audit, output results in the following JSON format:
 
 \`\`\`json
 {
-  "decision": "approve" | "revise" | "reject",
+  "decision": "revise",
   "feedback": "Overall feedback (1-3 sentences)",
   "issues": ["List of found issues (empty array if none)"],
   "suggestions": ["List of improvement suggestions (empty array if none)"],
@@ -315,7 +315,7 @@ After review, output results in the following JSON format:
 
 \`\`\`json
 {
-  "decision": "approve" | "revise" | "reject",
+  "decision": "revise",
   "feedback": "Overall feedback (1-3 sentences)",
   "issues": ["List of found issues (empty array if none)"],
   "suggestions": ["List of improvement suggestions (empty array if none)"],
@@ -477,8 +477,8 @@ Output the analysis results in the following JSON format:
 
 ## Important
 - Do NOT write code, only analyze
-- Do NOT deeply explore the project structure (minimize file reads)
-- Estimate based on task description (title + description) alone
+- Use only lightweight read_file/search_files evidence needed to ground sub-task descriptions and fileScope; do NOT deeply explore the project structure
+- Estimate from the task description plus any lightweight evidence you actually gathered
 - When uncertain, estimate conservatively (longer)
 - Output JSON result immediately (no additional verification needed)
 `;

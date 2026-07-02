@@ -9,7 +9,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, extname, dirname } from 'node:path';
 import { getRegistryStore } from './sqliteStore.js';
-import type { EntityKind, RiskLevel } from './schema.js';
+import type { CodeEntity, EntityKind, RiskLevel } from './schema.js';
 
 // ============ 상수 ============
 
@@ -708,8 +708,14 @@ export async function scanRepository(
   }
 
   // 레지스트리 동기화
-  const existing = store.listEntities({ projectId, limit: 100_000, offset: 0 });
-  const existingByQName = new Map(existing.entities.map(e => [e.qualifiedName, e]));
+  const existingEntities: CodeEntity[] = [];
+  const existingPageSize = 10_000;
+  for (let offset = 0; ; offset += existingPageSize) {
+    const page = store.listEntities({ projectId, limit: existingPageSize, offset });
+    existingEntities.push(...page.entities);
+    if (existingEntities.length >= page.total || page.entities.length === 0) break;
+  }
+  const existingByQName = new Map(existingEntities.map(e => [e.qualifiedName, e]));
   const extractedQNames = new Set<string>();
 
   let registered = 0;
@@ -749,9 +755,7 @@ export async function scanRepository(
         });
         registered++;
       } catch (err) {
-        if (!(err instanceof Error && err.message.includes('UNIQUE'))) {
-          errors.push(`register ${qualifiedName}: ${err instanceof Error ? err.message : String(err)}`);
-        }
+        errors.push(`register ${qualifiedName}: ${err instanceof Error ? err.message : String(err)}`);
       }
     } else {
       const needsUpdate =

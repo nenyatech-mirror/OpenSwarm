@@ -8,6 +8,8 @@
 import http from 'node:http';
 import type { HubEvent } from '../core/eventHub.js';
 
+const MAX_SSE_PARTIAL_BUFFER_CHARS = 64 * 1024;
+
 /**
  * Parse accumulated SSE text into events + the leftover (incomplete) tail.
  * Wire format (eventHub): `data: <json>\n\n` per event. Malformed frames are
@@ -52,6 +54,17 @@ export function eventStreamPath(skipReplay: boolean): string {
   return skipReplay ? '/api/events?skipReplay=1' : '/api/events';
 }
 
+function isValidSseResponse(res: http.IncomingMessage): boolean {
+  if (typeof res.statusCode === 'number' && (res.statusCode < 200 || res.statusCode >= 300)) return false;
+
+  // Unit tests use a tiny EventEmitter mock; real IncomingMessage always has headers.
+  if (!Object.prototype.hasOwnProperty.call(res, 'headers')) return true;
+
+  const rawContentType = res.headers['content-type'];
+  const contentType = Array.isArray(rawContentType) ? rawContentType.join(';') : rawContentType;
+  return typeof contentType === 'string' && contentType.toLowerCase().includes('text/event-stream');
+}
+
 /** Subscribe to the daemon's /api/events SSE stream, auto-reconnecting on drop. */
 export function connectEventStream(opts: EventStreamOptions): EventStreamHandle {
   const host = opts.host ?? '127.0.0.1';
@@ -63,9 +76,13 @@ export function connectEventStream(opts: EventStreamOptions): EventStreamHandle 
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   const scheduleReconnect = () => {
+    if (closed || timer) return;
+    buffer = '';
     opts.onStatus?.(false);
-    if (closed) return;
-    timer = setTimeout(connect, reconnectMs);
+    timer = setTimeout(() => {
+      timer = null;
+      connect();
+    }, reconnectMs);
   };
 
   function connect() {
@@ -73,15 +90,26 @@ export function connectEventStream(opts: EventStreamOptions): EventStreamHandle 
     req = http.get(
       { host, port: opts.port, path: eventStreamPath(connectedOnce), headers: { Accept: 'text/event-stream' } },
       (res) => {
+        if (!isValidSseResponse(res)) {
+          res.resume();
+          scheduleReconnect();
+          return;
+        }
         connectedOnce = true;
         opts.onStatus?.(true);
         res.setEncoding('utf-8');
         res.on('data', (chunk: string) => {
           buffer += chunk;
+          if (buffer.length > MAX_SSE_PARTIAL_BUFFER_CHARS) {
+            buffer = '';
+            res.destroy(new Error('SSE partial buffer exceeded limit'));
+            return;
+          }
           const { events, rest } = parseSseFrames(buffer);
           buffer = rest;
           for (const e of events) opts.onEvent(e);
         });
+        res.on('error', scheduleReconnect);
         res.on('end', scheduleReconnect);
       },
     );

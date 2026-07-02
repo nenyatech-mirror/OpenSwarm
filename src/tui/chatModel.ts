@@ -119,13 +119,11 @@ export function normalizeConfirm(input: string): 'yes' | 'no' | 'edit' {
  * input event, so Hangul appears doubled while ASCII is fine. Two observed shapes:
  *
  *   (A) one grapheme repeated N times      — '이' → '이이' or '이이이'
- *   (B) each grapheme doubled in place      — '이렇게' → '이이렇렇게게'
+ *   (B) each grapheme doubled in place     — '이렇게' → '이이렇렇게게'
  *
  * Collapse both back to the intended text. Only NON-ASCII graphemes are touched;
  * ASCII, single graphemes, odd-length mixed events, and differing graphemes pass
- * through untouched, so normal typing is unaffected. The only false positive is
- * pasting an exact run/pairing of identical multibyte characters (e.g. '각각'),
- * which is vanishingly rare. (INT-1964 only handled shape A at exactly length 2.)
+ * through untouched, so normal typing is unaffected.
  */
 export function dedupeDoubledGrapheme(input: string): string {
   const g = Array.from(input);
@@ -137,16 +135,14 @@ export function dedupeDoubledGrapheme(input: string): string {
   }
 
   // (B) even-length event where every adjacent pair is the same non-ASCII
-  //     grapheme → keep one of each pair.
+  // grapheme → keep one of each pair.
   if (g.length % 2 === 0) {
-    let paired = true;
     for (let i = 0; i < g.length; i += 2) {
       if (g[i] !== g[i + 1] || (g[i].codePointAt(0) ?? 0) <= 0x7f) {
-        paired = false;
-        break;
+        return input;
       }
     }
-    if (paired) return g.filter((_, i) => i % 2 === 0).join('');
+    return g.filter((_, i) => i % 2 === 0).join('');
   }
 
   return input;

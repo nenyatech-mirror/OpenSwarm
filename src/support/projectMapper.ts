@@ -148,11 +148,15 @@ export function findBestMatch(
   }
 
   const normalizedLinear = normalize(linearProjectName);
+  if (!normalizedLinear) {
+    return null;
+  }
   let bestMatch: LocalProject | null = null;
   let bestScore = 0;
 
   for (const local of localProjects) {
     const normalizedLocal = normalize(local.name);
+    if (!normalizedLocal) continue;
     const score = calculateSimilarity(normalizedLinear, normalizedLocal);
 
     if (score > bestScore) {
