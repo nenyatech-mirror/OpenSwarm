@@ -540,6 +540,53 @@ async function collectActiveScopes(worktreePath: string, selfBranch: string): Pr
   return scopes;
 }
 
+// Duplicate-issue-PR guard (INT-2544)
+//
+// Two parallel workers can each independently implement the same Linear issue on
+// their own branch and both open PRs — nothing checked whether one already exists.
+// Real incident: STONKS STO-1400 (PR #224 merged + PR #226 left open, CONFLICTING)
+// and STO-1454 (PR #221 merged + PR #228 left open, CONFLICTING) sat undetected
+// until a human noticed the "File overlap with in-flight work" comment and ran
+// `git merge-tree` by hand. Every OpenSwarm PR body literally contains
+// `Closes <issueIdentifier>`, so a GitHub body search finds siblings regardless of
+// branch name or merge state.
+
+/** Other PRs (any state) whose body already closes this Linear issue, excluding
+ *  this branch's own PR. Best-effort — any gh failure returns [] rather than
+ *  blocking PR creation. */
+async function findDuplicateIssuePRs(
+  worktreePath: string,
+  issueIdentifier: string,
+  selfBranch: string,
+): Promise<{ number: number; url: string; headRefName: string }[]> {
+  try {
+    const raw = await gh(
+      worktreePath, 'pr', 'list',
+      '--search', `"Closes ${issueIdentifier}" in:body`,
+      '--state', 'all',
+      '--json', 'number,url,headRefName',
+      '--limit', '10',
+    );
+    const prs: { number: number; url: string; headRefName: string }[] = JSON.parse(raw || '[]');
+    return prs.filter((pr) => pr.headRefName !== selfBranch);
+  } catch (err) {
+    console.warn('[Worktree] Duplicate-issue-PR check skipped:', err);
+    return [];
+  }
+}
+
+/** Render the duplicate-PR warning as a PR-body markdown section ('' if none). */
+function formatDuplicateIssueSection(issueIdentifier: string, duplicates: { number: number; url: string; headRefName: string }[]): string {
+  if (duplicates.length === 0) return '';
+  return [
+    '## ⚠️ Possible duplicate work',
+    '',
+    `${duplicates.length} other PR(s) already reference \`Closes ${issueIdentifier}\` — opened as a draft. Verify this isn't redundant with already-merged work before marking ready and merging:`,
+    '',
+    ...duplicates.map((d) => `- ${d.url} (${d.headRefName})`),
+  ].join('\n');
+}
+
 /**
  * Build the PR-body overlap section for this worktree branch. Returns '' when
  * there is no overlap or on any error (advisory — must not block PR creation).
@@ -622,11 +669,24 @@ export async function commitAndCreatePR(
   // Compute file overlap vs other in-flight work (advisory; never blocks). (INT-2392)
   const overlapSection = await buildFileOverlapSection(worktreePath, branchName);
 
+  // Another branch may already close this same Linear issue (INT-2544) — never
+  // block on it (the work is done and worth keeping visible), but never let it
+  // silently masquerade as the sole implementation either: open as draft.
+  const duplicates = await findDuplicateIssuePRs(worktreePath, issueIdentifier, branchName);
+  const duplicateSection = formatDuplicateIssueSection(issueIdentifier, duplicates);
+  if (duplicates.length > 0) {
+    console.warn(
+      `[Worktree] ${duplicates.length} other PR(s) already close ${issueIdentifier} — opening as draft: ` +
+      duplicates.map((d) => d.url).join(', '),
+    );
+  }
+
   // Create PR
   const prBody = [
     '## Summary',
     description || `${issueIdentifier}: ${title}`,
     ...(overlapSection ? ['', overlapSection] : []),
+    ...(duplicateSection ? ['', duplicateSection] : []),
     '',
     '## Linear',
     `Closes ${issueIdentifier}`,
@@ -635,7 +695,9 @@ export async function commitAndCreatePR(
     '🤖 Generated with [OpenSwarm](https://github.com/Intrect-io/OpenSwarm)',
   ].join('\n');
 
-  const prUrl = await gh(worktreePath, 'pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody);
+  const createArgs = ['pr', 'create', '--head', branchName, '--base', base.branch, '--title', title, '--body', prBody];
+  if (duplicates.length > 0) createArgs.push('--draft');
+  const prUrl = await gh(worktreePath, ...createArgs);
 
   const url = prUrl.trim();
   console.log(`[Worktree] PR created: ${url}`);

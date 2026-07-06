@@ -684,3 +684,100 @@ esac
     git(repo, 'worktree', 'remove', '--force', info.worktreePath);
   });
 });
+
+describe('duplicate-issue-PR guard (INT-2544)', () => {
+  let root: string;
+  let repo: string;
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { stdio: 'pipe' });
+
+  function setUpRepo(): void {
+    const originBare = join(root, 'origin.git');
+    execFileSync('git', ['init', '--bare', '-b', 'main', originBare], { stdio: 'pipe' });
+    execFileSync('git', ['init', '-b', 'main', repo], { stdio: 'pipe' });
+    git(repo, 'config', 'user.email', 'test@example.com');
+    git(repo, 'config', 'user.name', 'Test');
+    git(repo, 'config', 'commit.gpgsign', 'false');
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'index.ts'), 'export const x = 1;\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'init');
+    git(repo, 'remote', 'add', 'origin', originBare);
+    git(repo, 'push', 'origin', 'main');
+  }
+
+  function fakeGh(script: string): string {
+    const bin = join(root, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const ghLog = join(root, 'gh-args.log');
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${ghLog}"\n${script}\n`);
+    chmodSync(join(bin, 'gh'), 0o755);
+    return ghLog;
+  }
+
+  beforeEach(() => {
+    root = join(tmpdir(), `openswarm-dup-pr-${process.pid}-${Date.now()}`);
+    repo = join(root, 'repo');
+    mkdirSync(repo, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('opens as a draft with a warning when another PR already closes the same issue', async () => {
+    setUpRepo();
+    const info = await createWorktree(repo, 'INT-1', 'swarm/INT-1-test');
+    writeFileSync(join(info.worktreePath, 'src', 'index.ts'), 'export const x = 2;\n');
+
+    const ghLog = fakeGh(`case "$*" in
+  *"pr list --head"*) echo "";;
+  *"in:body"*) echo '[{"number":226,"url":"https://example.test/pull/226","headRefName":"swarm/other-branch"}]';;
+  *"pr list --state open"*) echo "[]";;
+  *"pr create"*) echo "https://example.test/pull/999";;
+esac`);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${join(root, 'bin')}:${prevPath}`;
+    try {
+      await commitAndCreatePR(info, 'Our change', 'INT-1', 'desc');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+
+    const calls = readFileSync(ghLog, 'utf8');
+    expect(calls).toMatch(/pr create.*--draft/s);
+    expect(calls).toContain('Possible duplicate work');
+    expect(calls).toContain('https://example.test/pull/226');
+
+    git(repo, 'worktree', 'remove', '--force', info.worktreePath);
+  });
+
+  it('opens normally (no draft, no warning) when no other PR closes the issue', async () => {
+    setUpRepo();
+    const info = await createWorktree(repo, 'INT-2', 'swarm/INT-2-test');
+    writeFileSync(join(info.worktreePath, 'src', 'index.ts'), 'export const x = 2;\n');
+
+    const ghLog = fakeGh(`case "$*" in
+  *"pr list --head"*) echo "";;
+  *"in:body"*) echo "[]";;
+  *"pr list --state open"*) echo "[]";;
+  *"pr create"*) echo "https://example.test/pull/999";;
+esac`);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${join(root, 'bin')}:${prevPath}`;
+    try {
+      await commitAndCreatePR(info, 'Our change', 'INT-2', 'desc');
+    } finally {
+      process.env.PATH = prevPath;
+    }
+
+    const calls = readFileSync(ghLog, 'utf8');
+    const createCall = calls.split('\n').find((l) => l.startsWith('pr create'));
+    expect(createCall).toBeTruthy();
+    expect(createCall).not.toContain('--draft');
+    expect(calls).not.toContain('Possible duplicate work');
+
+    git(repo, 'worktree', 'remove', '--force', info.worktreePath);
+  });
+});
