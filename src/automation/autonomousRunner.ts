@@ -1219,7 +1219,6 @@ export class AutonomousRunner {
 
       const candidates = await this.resolveRunnableCandidates(decision.tasks);
       const safeTasks = await this.detectSafeCandidateIds(candidates);
-      const before = enqueuedCount;
 
       for (const { task, projectPath } of candidates) {
         if (enqueuedCount >= maxSlots) break;
