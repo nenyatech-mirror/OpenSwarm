@@ -133,6 +133,74 @@ describe('AutonomousRunner per-project candidate cap', () => {
   });
 });
 
+describe('AutonomousRunner heartbeat backfill (INT-2570 follow-up)', () => {
+  const makeTask = (id: string, projectPath: string): TaskItem => ({
+    id,
+    source: 'linear',
+    title: `Task ${id}`,
+    priority: 3,
+    projectPath,
+    issueId: id,
+    issueIdentifier: id.toUpperCase(),
+    linearState: 'Todo',
+    createdAt: Date.now(),
+  });
+
+  // Live incident: a slow multi-heartbeat task (INT-2061) kept being the decision
+  // engine's top pick every 5-minute cycle even while already running, and the
+  // heartbeat gave up the instant that happened — 7 of 8 scheduler slots sat idle
+  // for 4+ hours with 18 other executable tasks waiting, because the loop treated
+  // "selectionBudget covered the whole candidate pool" as "nothing left to try",
+  // even though the one thing it found was immediately discarded as a duplicate.
+  it('backfills other candidates when the decision engine\'s pick is already running', async () => {
+    const repo = '/x/a';
+    const stuck = makeTask('stuck-1', repo);
+    const fresh = makeTask('fresh-1', repo);
+
+    const r = new AutonomousRunner(cfg({
+      allowedProjects: [repo],
+      autoExecute: true,
+      maxConcurrentTasks: 3,
+      worktreeMode: true,
+    }));
+    const internal = r as unknown as {
+      engine: { heartbeatMultiple: ReturnType<typeof vi.fn> };
+      scheduler: {
+        getAvailableSlots: ReturnType<typeof vi.fn>;
+        getStats: ReturnType<typeof vi.fn>;
+        isTaskRunning: ReturnType<typeof vi.fn>;
+        isTaskQueued: ReturnType<typeof vi.fn>;
+        isProjectBusy: ReturnType<typeof vi.fn>;
+      };
+      heartbeatParallel(tasks: TaskItem[]): Promise<void>;
+      resolveProjectPath(task: TaskItem): Promise<string | null>;
+      detectSafeCandidateIds(candidates: Array<{ task: TaskItem }>): Promise<Set<string>>;
+      runAvailableTasks(): Promise<void>;
+    };
+
+    // Pass 1 (top-of-heartbeat): the decision engine's only pick is already
+    // running. Pass 2 (backfill): it should be asked again with the remaining
+    // pool and surface the fresh candidate.
+    internal.engine.heartbeatMultiple = vi.fn()
+      .mockResolvedValueOnce({ action: 'execute', tasks: [{ task: stuck, workflow: {} }], reason: 'test', skippedCount: 0 })
+      .mockResolvedValueOnce({ action: 'execute', tasks: [{ task: fresh, workflow: {} }], reason: 'test', skippedCount: 0 });
+
+    internal.scheduler.getAvailableSlots = vi.fn(() => 3);
+    internal.scheduler.getStats = vi.fn(() => ({ running: 1, queued: 0, completed: 0, failed: 0 }) as ReturnType<typeof internal.scheduler.getStats>);
+    internal.scheduler.isTaskRunning = vi.fn((id: string) => id === 'stuck-1');
+    internal.scheduler.isTaskQueued = vi.fn(() => false);
+    internal.scheduler.isProjectBusy = vi.fn(() => false);
+    internal.resolveProjectPath = vi.fn(async task => task.projectPath ?? null);
+    internal.detectSafeCandidateIds = vi.fn(async candidates => new Set(candidates.map(c => c.task.id)));
+    internal.runAvailableTasks = vi.fn(async () => {});
+
+    await internal.heartbeatParallel([stuck, fresh]);
+
+    expect(internal.engine.heartbeatMultiple).toHaveBeenCalledTimes(2);
+    expect(r.getQueuedTasks().map(q => q.task.id)).toEqual(['fresh-1']);
+  });
+});
+
 describe('AutonomousRunner backlog grooming mapping (INT-1609)', () => {
   type Internal = { groupTasksForGrooming(tasks: TaskItem[]): Promise<Map<string, TaskItem[]>> };
 

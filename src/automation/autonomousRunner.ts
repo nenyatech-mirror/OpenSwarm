@@ -1237,8 +1237,20 @@ export class AutonomousRunner {
 
       if (enqueuedCount >= maxSlots) break;
       if (decision.tasks.length === 0) break;
-      if (selectionBudget >= selectableTasks.length) break;
-      if (enqueuedCount === before) continue;
+      // NOTE: no "selectionBudget >= selectableTasks.length ⇒ break" here — that
+      // used to short-circuit the WHOLE heartbeat the instant selectionBudget
+      // covered the full candidate pool (the common case whenever free slots
+      // exceed the candidate count), even when every one of decision.tasks
+      // turned out already-running/queued and got discarded above (`before`).
+      // A single hard-to-satisfy task occupying one slot for hours then starved
+      // every other free slot forever: same task re-selected + discarded each
+      // 5-min heartbeat, no backfill pass ever tried the rest of the pool. The
+      // loop's own progress guarantee is enough — consideredTaskIds grows by
+      // decision.tasks.length every pass, so selectableTasks strictly shrinks
+      // each iteration and the top-of-loop `selectionBudget === 0` check (line
+      // ~1197) is what actually terminates once nothing candidate remains.
+      // (INT-2570 follow-up, observed live: INT-2061 held a WAVE slot for 4h+
+      // while 7/8 scheduler slots sat idle with 18 executable tasks waiting.)
     }
 
     if (enqueuedCount === 0 && skippedCount > 0) {
