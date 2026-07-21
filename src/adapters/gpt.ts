@@ -18,7 +18,8 @@ import { resolveMcpTools } from '../mcp/mcpClient.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
-import { RateLimitError, rateLimitFromHttpResponse } from './rateLimitError.js';
+import { RateLimitError } from './rateLimitError.js';
+import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 
 const OPENAI_API_BASE = 'https://api.openai.com/v1';
@@ -139,6 +140,8 @@ export class GptCliAdapter implements CliAdapter {
     let retried = false;
 
     return async (messages: ChatMessage[], tools: ToolDefinition[]) => {
+      // Per-API-call throttle budget (INT-2907).
+      const throttle: ThrottleState = { attempts: 0 };
       const body: Record<string, unknown> = {
         model,
         messages,
@@ -172,11 +175,14 @@ export class GptCliAdapter implements CliAdapter {
             return doCall(token);
           }
 
-          // Usage/rate limit → TYPED RateLimitError at the source so the scheduler
-          // pauses instead of the loop swallowing a 429 into a fake empty success.
-          // Covers 429 rate_limit_exceeded AND 429 insufficient_quota. (INT-2520)
-          const rl = rateLimitFromHttpResponse(res.status, res.headers, errText);
-          if (rl) throw rl;
+          // A spent quota (429 insufficient_quota) → TYPED RateLimitError at the
+          // source so the scheduler pauses instead of the loop swallowing it into
+          // a fake empty success (INT-2520). A 429 rate_limit_exceeded is only
+          // OpenAI pacing us (RPM/TPM): wait it out and retry rather than
+          // reporting a usage limit that isn't there. (INT-2907)
+          if (await resolveLimitResponse('openai', res.status, res.headers, errText, throttle, { signal }) === 'retry') {
+            return doCall(accessToken);
+          }
 
           throw new Error(`OpenAI API error (${res.status}): ${errText.slice(0, 500)}`);
         }

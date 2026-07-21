@@ -18,6 +18,7 @@ import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
 import { RateLimitError } from './rateLimitError.js';
+import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 
 // 로컬 프로바이더 기본 URL 후보 (우선순위 순)
@@ -255,6 +256,8 @@ export class LocalModelAdapter implements CliAdapter {
    */
   private createApiCaller(baseUrl: string, model: string, onToken?: (delta: string) => void, signal?: AbortSignal) {
     return async (messages: ChatMessage[], tools: ToolDefinition[]) => {
+      // Per-API-call throttle budget (INT-2907).
+      const throttle: ThrottleState = { attempts: 0 };
       const body: Record<string, unknown> = {
         model,
         messages,
@@ -266,28 +269,40 @@ export class LocalModelAdapter implements CliAdapter {
         body.tools = tools;
       }
 
-      const res = await fetch(`${baseUrl}/v1/chat/completions`, {
-        method: 'POST',
-        headers: this.buildHeaders(),
-        body: JSON.stringify(body),
-        signal,
-      });
+      const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
+        const res = await fetch(`${baseUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: this.buildHeaders(),
+          body: JSON.stringify(body),
+          signal,
+        });
 
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '');
+        if (!res.ok) {
+          const errText = await res.text().catch(() => '');
 
-        if (res.status === 404 || errText.includes('not found')) {
-          const models = await this.listModels();
-          const modelList = models.length > 0
-            ? `Available: ${models.slice(0, 10).join(', ')}`
-            : 'No models loaded';
-          throw new Error(`Model "${model}" not found on ${baseUrl}. ${modelList}`);
+          if (res.status === 404 || errText.includes('not found')) {
+            const models = await this.listModels();
+            const modelList = models.length > 0
+              ? `Available: ${models.slice(0, 10).join(', ')}`
+              : 'No models loaded';
+            throw new Error(`Model "${model}" not found on ${baseUrl}. ${modelList}`);
+          }
+
+          // A local server has no quota — a 429 means it is busy (queue full,
+          // model still loading). Waiting is exactly the right answer, whereas
+          // the old `Local API error (429)` string was re-promoted to a rate
+          // limit downstream and paused the scheduler. (INT-2907)
+          if (await resolveLimitResponse('local', res.status, res.headers, errText, throttle, { signal }) === 'retry') {
+            return attempt();
+          }
+
+          throw new Error(`Local API error (${res.status}): ${errText.slice(0, 500)}`);
         }
 
-        throw new Error(`Local API error (${res.status}): ${errText.slice(0, 500)}`);
-      }
+        return consumeChatCompletionsStream(res, onToken);
+      };
 
-      return consumeChatCompletionsStream(res, onToken);
+      return attempt();
     };
   }
 

@@ -19,7 +19,8 @@ import {
 } from './agenticLoop.js';
 import { resolveMcpTools } from '../mcp/mcpClient.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
-import { RateLimitError, rateLimitFromHttpResponse } from './rateLimitError.js';
+import { RateLimitError } from './rateLimitError.js';
+import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
@@ -130,6 +131,8 @@ export interface AtlasCloudApiCallerOptions {
 
 export function createApiCaller(apiKey: string, model: string, opts: AtlasCloudApiCallerOptions = {}) {
   return async (messages: ChatMessage[], tools: ToolDefinition[]) => {
+    // Per-API-call throttle budget (INT-2907).
+    const throttle: ThrottleState = { attempts: 0 };
     const body: Record<string, unknown> = {
       model,
       messages,
@@ -142,24 +145,31 @@ export function createApiCaller(apiKey: string, model: string, opts: AtlasCloudA
       body.tools = tools;
     }
 
-    const res = await fetch(`${ATLASCLOUD_API_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    });
+    const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
+      const res = await fetch(`${ATLASCLOUD_API_BASE}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      });
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      const rl = rateLimitFromHttpResponse(res.status, res.headers, errText);
-      if (rl) throw rl;
-      throw new Error(`Atlas Cloud API error (${res.status}): ${errText.slice(0, 500)}`);
-    }
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        // Spent quota → typed RateLimitError (scheduler pauses); a throttle is
+        // waited out and retried instead of masquerading as one. (INT-2907)
+        if (await resolveLimitResponse('atlascloud', res.status, res.headers, errText, throttle, { signal: opts.signal }) === 'retry') {
+          return attempt();
+        }
+        throw new Error(`Atlas Cloud API error (${res.status}): ${errText.slice(0, 500)}`);
+      }
 
-    return consumeChatCompletionsStream(res, opts.onToken);
+      return consumeChatCompletionsStream(res, opts.onToken);
+    };
+
+    return attempt();
   };
 }
 

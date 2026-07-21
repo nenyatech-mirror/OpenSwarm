@@ -74,9 +74,27 @@ describe('AtlasCloudCliAdapter', () => {
     expect(body.tools[0].function.name).toBe('read_file');
   });
 
-  it('throws a typed RateLimitError on 429', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('Rate limit exceeded', { status: 429 })));
+  it('throws a typed RateLimitError when the body says the quota is spent', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('insufficient_quota', { status: 429 })));
     const callApi = createApiCaller('atlas-test-key', 'deepseek-ai/deepseek-v4-pro');
     await expect(callApi([{ role: 'user', content: 'x' }], [])).rejects.toBeInstanceOf(RateLimitError);
+  });
+
+  it('waits out a bare 429 throttle, then reports it as infra — never a usage limit (INT-2907)', async () => {
+    const fetchMock = vi.fn(async () => new Response('Rate limit exceeded', { status: 429 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const callApi = createApiCaller('atlas-test-key', 'deepseek-ai/deepseek-v4-pro');
+
+    vi.useFakeTimers();
+    try {
+      const pending = callApi([{ role: 'user', content: 'x' }], []).catch((e: Error) => e);
+      await vi.advanceTimersByTimeAsync(5_000 + 15_000 + 40_000 + 3_000);
+      const err = (await pending) as Error;
+      expect(err).not.toBeInstanceOf(RateLimitError);
+      expect(err.message).toContain('throttle-retry:');
+      expect(fetchMock).toHaveBeenCalledTimes(4); // initial + 3 retries
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

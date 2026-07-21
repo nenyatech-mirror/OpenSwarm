@@ -488,7 +488,7 @@ describe('429 throttle vs spent quota (INT-2907)', () => {
 
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(RateLimitError);
-    expect(err.message).toContain('codex-throttle:');
+    expect(err.message).toContain('throttle-retry:');
     expect(fetchMock).toHaveBeenCalledTimes(4); // initial + 3 retries
   });
 });

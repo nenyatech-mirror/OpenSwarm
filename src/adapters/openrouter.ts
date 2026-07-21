@@ -21,7 +21,8 @@ import {
 } from './agenticLoop.js';
 import { resolveMcpTools } from '../mcp/mcpClient.js';
 import { parseWorkerResult, parseReviewerResult } from './resultParsing.js';
-import { RateLimitError, rateLimitFromHttpResponse } from './rateLimitError.js';
+import { RateLimitError } from './rateLimitError.js';
+import { resolveLimitResponse, type ThrottleState } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { consumeChatCompletionsStream } from './chatStream.js';
 import type { ToolDefinition } from './tools.js';
@@ -165,6 +166,8 @@ export interface ApiCallerOptions {
 
 export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOptions = {}) {
   return async (messages: ChatMessage[], tools: ToolDefinition[]) => {
+    // Per-API-call throttle budget (INT-2907).
+    const throttle: ThrottleState = { attempts: 0 };
     const body: Record<string, unknown> = {
       model,
       messages: applyPromptCaching(messages, model),
@@ -192,29 +195,35 @@ export function createApiCaller(apiKey: string, model: string, opts: ApiCallerOp
       body.tools = tools;
     }
 
-    const res = await fetch(`${OPENROUTER_API_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        ...ATTRIBUTION_HEADERS,
-      },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    });
+    const attempt = async (): Promise<ReturnType<typeof consumeChatCompletionsStream>> => {
+      const res = await fetch(`${OPENROUTER_API_BASE}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          ...ATTRIBUTION_HEADERS,
+        },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      });
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '');
-      // OpenRouter signals out-of-credits with HTTP 402 "Insufficient credits"
-      // (NOT 429) and rate limits with 429. Throw a TYPED RateLimitError at the
-      // source so both pause the scheduler instead of the loop swallowing them
-      // into a fake empty success → false STUCK. (INT-2520)
-      const rl = rateLimitFromHttpResponse(res.status, res.headers, errText);
-      if (rl) throw rl;
-      throw new Error(`OpenRouter API error (${res.status}): ${errText.slice(0, 500)}`);
-    }
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        // OpenRouter signals out-of-credits with HTTP 402 "Insufficient credits"
+        // (NOT 429) — money, so waiting never helps: that stays a TYPED
+        // RateLimitError which pauses the scheduler instead of the loop
+        // swallowing it into a fake empty success → false STUCK (INT-2520).
+        // A 429 is pacing, so it is waited out and retried. (INT-2907)
+        if (await resolveLimitResponse('openrouter', res.status, res.headers, errText, throttle, { signal: opts.signal }) === 'retry') {
+          return attempt();
+        }
+        throw new Error(`OpenRouter API error (${res.status}): ${errText.slice(0, 500)}`);
+      }
 
-    return consumeChatCompletionsStream(res, opts.onToken);
+      return consumeChatCompletionsStream(res, opts.onToken);
+    };
+
+    return attempt();
   };
 }
 

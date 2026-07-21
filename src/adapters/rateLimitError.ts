@@ -146,8 +146,8 @@ const QUOTA_EXHAUSTED_SUBSTRINGS: readonly string[] = [
   'out_of_credits',
 ];
 
-export interface Codex429Classification {
-  /** True only when the response proves the plan window is spent. */
+export interface LimitClassification {
+  /** True only when the response proves the quota/window is spent. */
   quota: boolean;
   /** Retry-After in seconds, when the server specified one. */
   retryAfterSeconds?: number;
@@ -156,10 +156,17 @@ export interface Codex429Classification {
 }
 
 /**
- * Classify a codex-responses 429 as a spent quota or a transient throttle.
- * Deliberately does NOT reuse matchesRateLimitMessage: that registry includes
- * throttle phrasings ('rate_limit_exceeded', 'too many requests') which are
- * exactly what we need to tell apart here.
+ * Classify a limit-shaped HTTP response as a spent quota or a transient
+ * throttle. Deliberately does NOT reuse matchesRateLimitMessage: that registry
+ * includes throttle phrasings ('rate_limit_exceeded', 'too many requests')
+ * which are exactly what we need to tell apart here.
+ *
+ * Quota when the body says so (openrouter's out-of-credits 402 always says
+ * "Insufficient credits" — money, not pacing, so waiting never helps) or the
+ * codex window reads 100% used. The status alone is deliberately NOT enough:
+ * 402 is also plain "Payment Required" for auth/billing conditions that are not
+ * quota exhaustion, and pausing the scheduler on those is the mis-classification
+ * rateLimitFromHttpResponse already guards against. (INT-2520)
  *
  * Header provenance: `x-codex-primary-used-percent` / `-reset-at` /
  * `-window-minutes` are the same headers rateLimitFromCodexHeaders has read
@@ -170,7 +177,7 @@ export interface Codex429Classification {
  * under 100 with a silent body, the caller degrades to an infra error for that
  * one call (retried later) rather than pausing on a limit that isn't there.
  */
-export function classifyCodex429(headers: Headers | undefined, body: string): Codex429Classification {
+export function classifyLimitResponse(headers: Headers | undefined, body: string): LimitClassification {
   const num = (k: string): number | undefined => {
     const v = headers?.get(k);
     const n = v == null ? NaN : parseInt(v, 10);

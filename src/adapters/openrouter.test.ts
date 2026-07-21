@@ -211,10 +211,35 @@ describe('OpenRouterCliAdapter', () => {
     ).rejects.toThrow(/OpenRouter API error \(500\)/);
   });
 
-  it('throws a typed RateLimitError on 429 (rate limit) — INT-2520', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('Rate limit exceeded', { status: 429 })));
+  it('waits out a 429 and retries instead of reporting a usage limit — INT-2907', async () => {
+    // A 429 is OpenRouter pacing us, not an exhausted account: the old behavior
+    // (typed RateLimitError) paused the scheduler / aborted review --max runs.
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls++;
+      if (calls === 1) return new Response('Rate limit exceeded', { status: 429 });
+      return new Response(
+        [
+          'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}',
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+          'data: [DONE]',
+          '',
+        ].join('\n'),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
     const callApi = createApiCaller('sk-or-test-key', 'openai/gpt-4o');
-    await expect(callApi([{ role: 'user', content: 'x' }], [])).rejects.toBeInstanceOf(RateLimitError);
+
+    vi.useFakeTimers();
+    try {
+      const pending = callApi([{ role: 'user', content: 'x' }], []);
+      await vi.advanceTimersByTimeAsync(6_000); // 5s backoff + jitter headroom
+      await expect(pending).resolves.toBeDefined();
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('throws a typed RateLimitError on 402 out-of-credits — INT-2520', async () => {

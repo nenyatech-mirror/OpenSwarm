@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { classifyCodex429, detectRateLimit, rateLimitFromCodexHeaders, rateLimitFromHttpResponse, matchesRateLimitMessage, RateLimitError } from './rateLimitError.js';
-import { throttleWaitMs } from './codexResponses.js';
+import { classifyLimitResponse, detectRateLimit, rateLimitFromCodexHeaders, rateLimitFromHttpResponse, matchesRateLimitMessage, RateLimitError } from './rateLimitError.js';
+import { resolveLimitResponse, throttleWaitMs } from './throttleRetry.js';
 import { isInfraError } from './errorClassification.js';
 import { runAgenticLoop } from './agenticLoop.js';
 
@@ -221,32 +221,57 @@ describe('rateLimitFromCodexHeaders (INT-2192)', () => {
   });
 });
 
-describe('classifyCodex429 — spent quota vs short-window throttle (INT-2907)', () => {
+describe('classifyLimitResponse — spent quota vs short-window throttle (INT-2907)', () => {
   it('treats a body quota signature as a spent quota', () => {
-    const c = classifyCodex429(new Headers(), '{"error":{"type":"usage_limit_reached","resets_at":1782824949}}');
+    const c = classifyLimitResponse(new Headers(), '{"error":{"type":"usage_limit_reached","resets_at":1782824949}}');
     expect(c.quota).toBe(true);
   });
 
   it('treats a 100%-consumed primary window as a spent quota even with a bare body', () => {
-    const c = classifyCodex429(new Headers({ 'x-codex-primary-used-percent': '100' }), 'Too Many Requests');
+    const c = classifyLimitResponse(new Headers({ 'x-codex-primary-used-percent': '100' }), 'Too Many Requests');
     expect(c.quota).toBe(true);
     expect(c.usedPercent).toBe(100);
   });
 
   it('treats a plain concurrency 429 as a throttle, not a quota', () => {
     // The exact production shape: quota to spare, but 16 subagents at once.
-    const c = classifyCodex429(new Headers({ 'x-codex-primary-used-percent': '12' }), '{"error":{"message":"Too many requests"}}');
+    const c = classifyLimitResponse(new Headers({ 'x-codex-primary-used-percent': '12' }), '{"error":{"message":"Too many requests"}}');
     expect(c.quota).toBe(false);
     expect(c.usedPercent).toBe(12);
   });
 
   it('does not promote rate_limit_exceeded (a throttle code) to a quota', () => {
-    expect(classifyCodex429(new Headers(), '{"code":"rate_limit_exceeded"}').quota).toBe(false);
+    expect(classifyLimitResponse(new Headers(), '{"code":"rate_limit_exceeded"}').quota).toBe(false);
+  });
+
+  it('does not call a bare 402 a spent quota — only a credit signature does (INT-2520 contract)', () => {
+    // "Payment Required" is also used for auth/billing states that are not
+    // exhaustion; pausing the scheduler on those is the regression this guards.
+    expect(classifyLimitResponse(new Headers(), 'Payment Required').quota).toBe(false);
+    expect(classifyLimitResponse(new Headers(), 'Insufficient credits. Add more to continue.').quota).toBe(true);
   });
 
   it('surfaces Retry-After for the throttle wait', () => {
-    expect(classifyCodex429(new Headers({ 'retry-after': '7' }), '').retryAfterSeconds).toBe(7);
-    expect(classifyCodex429(new Headers(), '').retryAfterSeconds).toBeUndefined();
+    expect(classifyLimitResponse(new Headers({ 'retry-after': '7' }), '').retryAfterSeconds).toBe(7);
+    expect(classifyLimitResponse(new Headers(), '').retryAfterSeconds).toBeUndefined();
+  });
+});
+
+describe('resolveLimitResponse gating (INT-2907)', () => {
+  const state = () => ({ attempts: 0 });
+
+  it('leaves a non-limit failure to the caller', async () => {
+    await expect(resolveLimitResponse('openai', 500, new Headers(), 'Internal Server Error', state())).resolves.toBe('other');
+  });
+
+  it('leaves a bare 402 to the caller instead of pausing on it', async () => {
+    await expect(resolveLimitResponse('openrouter', 402, new Headers(), 'Payment Required', state())).resolves.toBe('other');
+  });
+
+  it('still pauses on the out-of-credits 402 openrouter actually sends', async () => {
+    await expect(
+      resolveLimitResponse('openrouter', 402, new Headers(), '{"error":{"message":"Insufficient credits. Add more to continue."}}', state()),
+    ).rejects.toBeInstanceOf(RateLimitError);
   });
 });
 
@@ -266,7 +291,7 @@ describe('throttle backoff + downstream classification (INT-2907)', () => {
   it('classifies an exhausted throttle budget as infra, never as a rate limit', () => {
     // Wording matters: if this message tripped detectRateLimit it would be
     // re-promoted downstream and abort the whole review --max run again.
-    const msg = 'codex-throttle: persistent 429 after 3 retries (window 42% used)';
+    const msg = 'throttle-retry: codex still limited (HTTP 429, window 42% used) after 3 retries';
     expect(matchesRateLimitMessage(msg)).toBe(false);
     expect(detectRateLimit('', msg)).toBeNull();
     expect(isInfraError(new Error(msg))).toBe(true);
