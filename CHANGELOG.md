@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.0 — 2026-07-21
+
+### Changed
+
+- **`review --max --fix` no longer edits your branch** — fix workers used to accumulate their edits in the caller's working tree, so an audit mixed itself into whatever a daemon worker (or you) was doing on that branch. The fix loop now forks the current HEAD into a dedicated worktree (`<repo>/worktree/audit-<ts>`, branch `swarm/audit-<ts>`), runs the audit, fixes and deterministic verification there, then commits and pushes the result as a PR against the branch it forked from (falling back to the default branch when that branch isn't on the remote). The PR references the Linear audit issue — `Closes` only the master issue this run created, `Refs` for an explicit `--issues <id>` parent — and the PR link is commented back onto that issue. A run that changes nothing discards the worktree instead of leaving an empty branch behind; a failed PR keeps it for manual recovery. Reports, repo knowledge and Linear project mapping still use the original repo path. `--in-place` restores the previous working-tree behavior. (INT-2905)
+
 ## 0.17.7 — 2026-07-16
 
 ### Added
