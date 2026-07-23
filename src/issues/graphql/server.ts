@@ -4,13 +4,13 @@
 // Purpose: graphql-yoga 서버, 기존 HTTP 서버에 통합
 // ============================================
 
-import { GraphQLError, getOperationAST } from 'graphql';
-import { createSchema, createYoga, type Plugin } from 'graphql-yoga';
+import { createSchema, createYoga } from 'graphql-yoga';
 import { typeDefs } from './typeDefs.js';
 import { resolvers } from './resolvers.js';
 import { registryTypeDefs } from '../../registry/graphql/typeDefs.js';
 import { registryResolvers } from '../../registry/graphql/resolvers.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 
 const CORS_METHODS = 'GET, POST, OPTIONS';
 const CORS_HEADERS = 'Content-Type, Authorization, X-OpenSwarm-GraphQL-Token';
@@ -51,41 +51,51 @@ function applyCors(req: IncomingMessage, res: ServerResponse): boolean {
   return true;
 }
 
-function hasValidMutationToken(request: Request): boolean {
+function tokenMatches(candidate: string | undefined, expected: string): boolean {
+  if (!candidate) return false;
+  const left = Buffer.from(candidate);
+  const right = Buffer.from(expected);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/**
+ * Pull the credentials out of an `Authorization: Bearer <token>` header.
+ *
+ * Parsed by hand rather than with `/^Bearer\s+(.+)$/i`: there the `\s+` and
+ * `(.+)` overlap, so an attacker-supplied `Bearer` header padded with tabs
+ * backtracks polynomially (CodeQL js/polynomial-redos). Slicing and trimming
+ * is linear in the header length.
+ */
+const BEARER_SCHEME = 'bearer';
+
+function parseBearerToken(auth: string): string | undefined {
+  if (auth.slice(0, BEARER_SCHEME.length).toLowerCase() !== BEARER_SCHEME) return undefined;
+  const rest = auth.slice(BEARER_SCHEME.length);
+  // RFC 7235: at least one space separates the scheme from the credentials.
+  if (rest === '' || !/\s/.test(rest[0])) return undefined;
+  return rest.trim() || undefined;
+}
+
+function hasValidToken(headers: { authorization?: string; token?: string }): boolean {
   const token = process.env.OPENSWARM_GRAPHQL_TOKEN?.trim();
   if (!token) return false;
-
-  const auth = request.headers.get('authorization') ?? '';
-  const bearer = auth.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
-  const headerToken = request.headers.get('x-openswarm-graphql-token')?.trim();
-  return bearer === token || headerToken === token;
+  const bearer = parseBearerToken(headers.authorization ?? '');
+  return tokenMatches(bearer, token) || tokenMatches(headers.token?.trim(), token);
 }
 
-function isMutationRequestAuthorized(request: Request): boolean {
-  if (hasValidMutationToken(request)) return true;
-
-  const origin = request.headers.get('origin');
-  return origin ? isAllowedOrigin(origin) : true;
+function isLoopbackAddress(address: string | undefined): boolean {
+  return address === '127.0.0.1' || address === '::1' || address?.startsWith('::ffff:127.') === true;
 }
 
-const mutationAuthPlugin: Plugin = {
-  onExecute({ args, setResultAndStopExecution }) {
-    const operation = getOperationAST(args.document, args.operationName);
-    if (operation?.operation !== 'mutation') return;
-    if (isMutationRequestAuthorized(args.contextValue.request)) return;
-
-    setResultAndStopExecution({
-      errors: [
-        new GraphQLError('Unauthorized GraphQL mutation', {
-          extensions: {
-            code: 'UNAUTHORIZED',
-            http: { status: 403 },
-          },
-        }),
-      ],
-    });
-  },
-};
+export function isGraphQLTransportAuthorized(req: IncomingMessage): boolean {
+  if (isLoopbackAddress(req.socket?.remoteAddress)) return true;
+  const authorization = Array.isArray(req.headers.authorization)
+    ? req.headers.authorization[0]
+    : req.headers.authorization;
+  const tokenHeader = req.headers['x-openswarm-graphql-token'];
+  const token = Array.isArray(tokenHeader) ? tokenHeader[0] : tokenHeader;
+  return hasValidToken({ authorization, token });
+}
 
 // GraphQL Yoga 인스턴스 생성 (이슈 + 코드 레지스트리 스키마 머지)
 const yoga = createYoga({
@@ -95,7 +105,6 @@ const yoga = createYoga({
   }),
   graphqlEndpoint: '/graphql',
   cors: false,
-  plugins: [mutationAuthPlugin],
   logging: {
     debug: () => {},
     info: (...args: any[]) => console.log('[GraphQL]', ...args),
@@ -113,6 +122,11 @@ export async function handleGraphQL(
   res: ServerResponse,
 ): Promise<void> {
   if (applyCors(req, res)) return;
+  if (!isGraphQLTransportAuthorized(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ errors: [{ message: 'Unauthorized GraphQL request' }] }));
+    return;
+  }
 
   // graphql-yoga는 Node.js HTTP 서버에서 req, res를 직접 처리
   // handle() 호출 시 내부적으로 res에 응답을 작성
